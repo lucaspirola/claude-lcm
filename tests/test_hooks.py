@@ -114,6 +114,61 @@ def test_session_end_sets_ended_at(tmp_path: Path):
     assert ended is not None
 
 
+def test_session_end_source_clear_writes_handoff_and_end_reason(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    cwd = str(tmp_path)
+    # Arrange: open session A in project_key = sanitize_path(cwd)
+    _run_hook(
+        "adapter.hooks.session_start",
+        {"session_id": "A", "cwd": cwd, "source": "startup"},
+        vault,
+    )
+    # Act: SessionEnd with source=clear
+    rc, _, _ = _run_hook(
+        "adapter.hooks.session_end",
+        {"session_id": "A", "cwd": cwd, "source": "clear"},
+        vault,
+    )
+    assert rc == 0
+
+    conn = sqlite3.connect(vault)
+    # end_reason stamped
+    assert conn.execute(
+        "SELECT end_reason FROM sessions WHERE session_id='A'"
+    ).fetchone() == ("clear",)
+    # clear_handoff row present, keyed on project_key = sanitize_path(cwd)
+    from claude_lcm.workspace import sanitize_path
+    pk = sanitize_path(cwd)
+    row = conn.execute(
+        "SELECT ending_session_id FROM clear_handoff WHERE project_key=?",
+        (pk,),
+    ).fetchone()
+    assert row == ("A",)
+
+
+def test_session_end_source_normal_sets_end_reason_normal(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    _run_hook(
+        "adapter.hooks.session_start",
+        {"session_id": "A", "cwd": str(tmp_path), "source": "startup"},
+        vault,
+    )
+    _run_hook(
+        "adapter.hooks.session_end",
+        {"session_id": "A", "cwd": str(tmp_path), "source": "exit"},
+        vault,
+    )
+    row = sqlite3.connect(vault).execute(
+        "SELECT end_reason FROM sessions WHERE session_id='A'"
+    ).fetchone()
+    assert row == ("normal",)
+    # No handoff row
+    cnt = sqlite3.connect(vault).execute(
+        "SELECT COUNT(*) FROM clear_handoff"
+    ).fetchone()[0]
+    assert cnt == 0
+
+
 def test_concurrent_writers(tmp_path: Path):
     """Spawn 5 parallel hook processes against the same vault.
 
