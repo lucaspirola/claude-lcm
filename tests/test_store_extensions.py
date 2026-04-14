@@ -127,3 +127,20 @@ def test_store_init_is_idempotent_on_existing_vault(tmp_path):
     # Re-open — must not raise "duplicate column" or similar.
     store = MessageStore(db)
     store.close()
+
+
+def test_open_session_persists_project_key_and_parent(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session(
+        session_id="B",
+        agent_kind="claude-code",
+        project_key="-home-lucas-ai-x",
+        parent_session_id="A",
+    )
+    row = store._conn.execute(
+        "SELECT project_key, parent_session_id FROM sessions WHERE session_id='B'"
+    ).fetchone()
+    assert row == ("-home-lucas-ai-x", "A")
+    store.close()

@@ -35,6 +35,8 @@ class ClaudeLcmEngine:
     def open_session(self, session_id: str, agent_kind: str = "claude-code",
                      workspace_fingerprint: str | None = None,
                      workspace_path: str | None = None,
+                     project_key: str | None = None,
+                     parent_session_id: str | None = None,
                      metadata: Dict[str, Any] | None = None) -> None:
         self._session_id = session_id
         self._store.open_session(
@@ -42,8 +44,13 @@ class ClaudeLcmEngine:
             agent_kind=agent_kind,
             workspace_fingerprint=workspace_fingerprint,
             workspace_path=workspace_path,
+            project_key=project_key,
+            parent_session_id=parent_session_id,
             metadata=metadata,
         )
+
+    def set_parent_session(self, session_id: str, parent_session_id: str) -> None:
+        self._store.set_parent_session(session_id, parent_session_id)
 
     def close_session(self, session_id: str | None = None) -> None:
         sid = session_id or self._session_id

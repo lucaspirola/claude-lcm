@@ -234,21 +234,34 @@ class MessageStore:
     def open_session(self, session_id: str, agent_kind: str,
                      workspace_fingerprint: str | None = None,
                      workspace_path: str | None = None,
+                     project_key: str | None = None,
+                     parent_session_id: str | None = None,
                      metadata: Dict[str, Any] | None = None) -> None:
         """Insert a sessions row. Idempotent via INSERT OR IGNORE."""
         self._conn.execute(
             """INSERT OR IGNORE INTO sessions
                (session_id, agent_kind, workspace_fingerprint,
-                workspace_path, started_at, metadata)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                workspace_path, project_key, parent_session_id,
+                started_at, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 agent_kind,
                 workspace_fingerprint,
                 workspace_path,
+                project_key,
+                parent_session_id,
                 time.time(),
                 json.dumps(metadata) if metadata else None,
             ),
+        )
+        self._conn.commit()
+
+    def set_parent_session(self, session_id: str, parent_session_id: str) -> None:
+        """Stamp parent_session_id on an existing session row."""
+        self._conn.execute(
+            "UPDATE sessions SET parent_session_id = ? WHERE session_id = ?",
+            (parent_session_id, session_id),
         )
         self._conn.commit()
 
