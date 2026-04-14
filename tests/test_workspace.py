@@ -41,27 +41,15 @@ def test_sanitize_path_long_path_truncates_with_hash():
 
 
 def test_sanitize_path_parity_with_live_claude_projects_dir():
-    """Smoke-test against a real ~/.claude/projects/* directory.
+    """Verify our sanitize_path output matches the actual ~/.claude/projects/ directory name.
 
-    Picks any subdirectory of ~/.claude/projects and reconstructs the
-    original path by replacing hyphens with slashes. Not strictly sound
-    (ambiguous for paths containing hyphens), but for the common case of
-    a path like /home/lucas/ai/claude-lcm it works as a parity probe.
-    If ~/.claude/projects does not exist, the test skips.
+    Directly compares sanitize_path(known_path) against the on-disk directory name
+    that CC created. Skips if the known path's projects directory doesn't exist.
     """
-    import os
     import pytest
 
-    projects_dir = Path.home() / ".claude" / "projects"
-    if not projects_dir.is_dir():
-        pytest.skip("no ~/.claude/projects on this machine")
-    for child in projects_dir.iterdir():
-        if not child.is_dir():
-            continue
-        name = child.name
-        # Reconstruct a plausible absolute path from the sanitized name.
-        candidate = "/" + name.lstrip("-").replace("-", "/")
-        if os.path.isabs(candidate) and Path(candidate).exists():
-            assert sanitize_path(candidate) == name
-            return
-    pytest.skip("no reconstructible projects dir found")
+    known_path = "/home/lucas/ai/claude-lcm"
+    expected_dir = Path.home() / ".claude" / "projects" / "-home-lucas-ai-claude-lcm"
+    if not expected_dir.is_dir():
+        pytest.skip(f"~/.claude/projects/-home-lucas-ai-claude-lcm does not exist on this machine")
+    assert sanitize_path(known_path) == "-home-lucas-ai-claude-lcm"

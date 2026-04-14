@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -48,10 +49,8 @@ def fingerprint(cwd: str | os.PathLike | None = None) -> tuple[str, str]:
 
 
 # Port of CC's sanitizePath for project_key identity.
-import re as _re
-
 MAX_SANITIZED_LENGTH = 200
-_NON_ALNUM_RE = _re.compile(r"[^a-zA-Z0-9]")
+_NON_ALNUM_RE = re.compile(r"[^a-zA-Z0-9]")
 
 
 def _djb2_hash(s: str) -> str:
