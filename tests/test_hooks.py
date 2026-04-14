@@ -251,3 +251,65 @@ def test_concurrent_writers(tmp_path: Path):
         "SELECT COUNT(*) FROM messages WHERE session_id='stress-1'"
     ).fetchone()
     assert rows[0] == 5
+
+
+def test_clear_chain_end_to_end(tmp_path: Path):
+    """Simulate A -> /clear -> B -> /clear -> C via subprocess hooks."""
+    vault = tmp_path / "v.sqlite"
+    cwd = str(tmp_path)
+
+    # A starts and ends via /clear
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A", "cwd": cwd, "source": "startup"}, vault)
+    _run_hook("adapter.hooks.user_prompt_submit",
+              {"session_id": "A", "prompt": "first message in A"}, vault)
+    _run_hook("adapter.hooks.session_end",
+              {"session_id": "A", "cwd": cwd, "source": "clear"}, vault)
+
+    # B starts via /clear, ends via /clear
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "B", "cwd": cwd, "source": "clear"}, vault)
+    _run_hook("adapter.hooks.user_prompt_submit",
+              {"session_id": "B", "prompt": "first message in B"}, vault)
+    _run_hook("adapter.hooks.session_end",
+              {"session_id": "B", "cwd": cwd, "source": "clear"}, vault)
+
+    # C starts via /clear
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "C", "cwd": cwd, "source": "clear"}, vault)
+
+    # Lineage walk from C
+    from claude_lcm.store import MessageStore
+    store = MessageStore(vault)
+    assert store.walk_lineage("C") == ["C", "B", "A"]
+    # Handoff drained
+    from claude_lcm.workspace import sanitize_path
+    assert store.take_clear_handoff(sanitize_path(cwd)) is None
+    store.close()
+
+
+def test_clear_chains_do_not_cross_projects(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    proj_x = tmp_path / "x"; proj_x.mkdir()
+    proj_y = tmp_path / "y"; proj_y.mkdir()
+
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A", "cwd": str(proj_x), "source": "startup"}, vault)
+    _run_hook("adapter.hooks.session_end",
+              {"session_id": "A", "cwd": str(proj_x), "source": "clear"}, vault)
+
+    # A /clear in project Y should see no handoff from X
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "B", "cwd": str(proj_y), "source": "clear"}, vault)
+    row = sqlite3.connect(vault).execute(
+        "SELECT parent_session_id FROM sessions WHERE session_id='B'"
+    ).fetchone()
+    assert row == (None,)
+
+    # And the original X handoff is still intact for X's own next session
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A2", "cwd": str(proj_x), "source": "clear"}, vault)
+    row = sqlite3.connect(vault).execute(
+        "SELECT parent_session_id FROM sessions WHERE session_id='A2'"
+    ).fetchone()
+    assert row == ("A",)
