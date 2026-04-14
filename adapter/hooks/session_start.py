@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from adapter.hooks._common import engine_for, safe_main, write_response
-from claude_lcm.workspace import fingerprint
+from claude_lcm.workspace import fingerprint, sanitize_path
 
 
 def handle(payload: Dict[str, Any]) -> None:
@@ -14,18 +14,27 @@ def handle(payload: Dict[str, Any]) -> None:
     if not session_id:
         return
     cwd = payload.get("cwd")
+    source = payload.get("source")
+    project_key = sanitize_path(cwd) if cwd else None
     fp, path = fingerprint(cwd)
+
     with engine_for(session_id) as eng:
         eng.open_session(
             session_id=session_id,
             agent_kind="claude-code",
             workspace_fingerprint=fp,
             workspace_path=path,
+            project_key=project_key,
             metadata={
-                "source": payload.get("source"),
+                "source": source,
                 "transcript_path": payload.get("transcript_path"),
             },
         )
+        if source == "clear" and project_key:
+            parent_sid = eng.take_clear_handoff(project_key)
+            if parent_sid:
+                eng.set_parent_session(session_id, parent_sid)
+
     write_response({
         "continue": True,
         "hookSpecificOutput": {

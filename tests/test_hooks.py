@@ -169,6 +169,52 @@ def test_session_end_source_normal_sets_end_reason_normal(tmp_path: Path):
     assert cnt == 0
 
 
+def test_session_start_stamps_project_key(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    _run_hook(
+        "adapter.hooks.session_start",
+        {"session_id": "A", "cwd": str(tmp_path), "source": "startup"},
+        vault,
+    )
+    from claude_lcm.workspace import sanitize_path
+    row = sqlite3.connect(vault).execute(
+        "SELECT project_key FROM sessions WHERE session_id='A'"
+    ).fetchone()
+    assert row == (sanitize_path(str(tmp_path)),)
+
+
+def test_session_start_source_clear_links_parent_and_drains_handoff(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    cwd = str(tmp_path)
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A", "cwd": cwd, "source": "startup"}, vault)
+    _run_hook("adapter.hooks.session_end",
+              {"session_id": "A", "cwd": cwd, "source": "clear"}, vault)
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "B", "cwd": cwd, "source": "clear"}, vault)
+
+    conn = sqlite3.connect(vault)
+    row = conn.execute(
+        "SELECT parent_session_id FROM sessions WHERE session_id='B'"
+    ).fetchone()
+    assert row == ("A",)
+    # handoff consumed
+    cnt = conn.execute("SELECT COUNT(*) FROM clear_handoff").fetchone()[0]
+    assert cnt == 0
+
+
+def test_session_start_source_clear_no_handoff_is_no_op(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    # Fresh vault, SessionStart(source=clear) with no prior SessionEnd.
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "B", "cwd": str(tmp_path), "source": "clear"},
+              vault)
+    row = sqlite3.connect(vault).execute(
+        "SELECT parent_session_id FROM sessions WHERE session_id='B'"
+    ).fetchone()
+    assert row == (None,)
+
+
 def test_concurrent_writers(tmp_path: Path):
     """Spawn 5 parallel hook processes against the same vault.
 
