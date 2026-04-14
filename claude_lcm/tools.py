@@ -22,6 +22,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_scope_session_ids(engine: "ClaudeLcmEngine",
+                                scope: str) -> list[str] | None:
+    """Return the list of session ids to filter by for a given scope.
+
+    'lineage'  — walk parent_session_id chain from current session
+    'workspace' — all sessions with the same project_key as current session
+    'session'  — only the current session
+    """
+    current = getattr(engine, "_session_id", None)
+    if not current:
+        return []
+    if scope == "session":
+        return [current]
+    if scope == "workspace":
+        pk = engine._store.project_key_for_session(current)
+        if pk is None:
+            return [current]
+        rows = engine._store._conn.execute(
+            "SELECT session_id FROM sessions WHERE project_key = ?",
+            (pk,),
+        ).fetchall()
+        return [r[0] for r in rows]
+    # default: lineage
+    return engine._store.walk_lineage(current)
+
+
 def _require_engine(kwargs: Dict[str, Any]) -> "ClaudeLcmEngine | None":
     engine = kwargs.get("engine")
     return engine if engine is not None else None
@@ -88,11 +114,16 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "No query provided"})
 
     limit = args.get("limit", 10)
+    scope = args.get("scope", "lineage")
+    if scope not in ("lineage", "workspace", "session"):
+        scope = "lineage"
+
     session_id = engine._session_id
+    session_ids = _resolve_scope_session_ids(engine, scope)
     results = []
 
     try:
-        msg_hits = engine._store.search(query, session_id=session_id, limit=limit)
+        msg_hits = engine._store.search(query, session_ids=session_ids, limit=limit)
         for hit in msg_hits:
             results.append(
                 {
@@ -123,7 +154,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         logger.debug("Node search failed: %s", exc)
 
     results.sort(key=lambda result: (0 if result["type"] == "message" else 1, result.get("depth", "")))
-    return json.dumps({"query": query, "total_results": len(results), "results": results[:limit]})
+    return json.dumps({"query": query, "scope": scope, "total_results": len(results), "results": results[:limit]})
 
 
 def lcm_describe(args: Dict[str, Any], **kwargs) -> str:

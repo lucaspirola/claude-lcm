@@ -38,7 +38,10 @@ class ClaudeLcmEngine:
                      project_key: str | None = None,
                      parent_session_id: str | None = None,
                      metadata: Dict[str, Any] | None = None) -> None:
-        self._session_id = session_id
+        # Only adopt session_id as the active session when the engine does not
+        # already have one (i.e. was not constructed with an explicit session_id).
+        if self._session_id is None:
+            self._session_id = session_id
         self._store.open_session(
             session_id=session_id,
             agent_kind=agent_kind,

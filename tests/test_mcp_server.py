@@ -70,3 +70,64 @@ def test_doctor_healthy(engine):
     names = {c["check"] for c in out["checks"]}
     assert {"database_integrity", "fts_index_sync",
             "orphaned_dag_nodes", "schema_version"} <= names
+
+
+def test_lcm_grep_scope_lineage_walks_parents(tmp_path):
+    import json
+    from claude_lcm.config import ClaudeLcmConfig
+    from claude_lcm.engine import ClaudeLcmEngine
+    from claude_lcm.tools import lcm_grep
+
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="B")
+    eng.open_session("A", project_key="-pk")
+    eng.open_session("B", project_key="-pk", parent_session_id="A")
+    eng.ingest_message({"role": "user", "content": "alpha in A"}, session_id="A")
+    eng.ingest_message({"role": "user", "content": "beta in B"}, session_id="B")
+
+    out = json.loads(lcm_grep({"query": "alpha", "scope": "lineage"},
+                               engine=eng))
+    snippets = [r.get("snippet", "") for r in out["results"]]
+    assert any("alpha" in s for s in snippets), out
+    eng.close()
+
+
+def test_lcm_grep_scope_session_excludes_parent(tmp_path):
+    import json
+    from claude_lcm.config import ClaudeLcmConfig
+    from claude_lcm.engine import ClaudeLcmEngine
+    from claude_lcm.tools import lcm_grep
+
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="B")
+    eng.open_session("A", project_key="-pk")
+    eng.open_session("B", project_key="-pk", parent_session_id="A")
+    eng.ingest_message({"role": "user", "content": "alpha in A"}, session_id="A")
+    eng.ingest_message({"role": "user", "content": "alpha in B"}, session_id="B")
+
+    out = json.loads(lcm_grep({"query": "alpha", "scope": "session"},
+                               engine=eng))
+    # Only B's message, not A's
+    assert out["total_results"] == 1
+    eng.close()
+
+
+def test_lcm_grep_scope_workspace_crosses_siblings(tmp_path):
+    import json
+    from claude_lcm.config import ClaudeLcmConfig
+    from claude_lcm.engine import ClaudeLcmEngine
+    from claude_lcm.tools import lcm_grep
+
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="B")
+    eng.open_session("A", project_key="-pk")
+    eng.open_session("B", project_key="-pk")  # sibling, no parent link
+    eng.open_session("Z", project_key="-other")
+    eng.ingest_message({"role": "user", "content": "alpha in A"}, session_id="A")
+    eng.ingest_message({"role": "user", "content": "alpha in B"}, session_id="B")
+    eng.ingest_message({"role": "user", "content": "alpha in Z"}, session_id="Z")
+
+    out = json.loads(lcm_grep({"query": "alpha", "scope": "workspace"},
+                               engine=eng))
+    assert out["total_results"] == 2  # A and B, not Z
+    eng.close()

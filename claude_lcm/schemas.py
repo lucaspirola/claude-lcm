@@ -20,6 +20,19 @@ _SESSION_ID_PARAM = {
     ),
 }
 
+_SCOPE_PARAM = {
+    "type": "string",
+    "enum": ["lineage", "workspace", "session"],
+    "description": (
+        "Search scope. 'lineage' (default) walks parent_session_id from "
+        "the current session transitively — includes prior sessions "
+        "chained by /clear. 'workspace' widens to every session in the "
+        "same project_key (sanitized cwd). 'session' limits to the "
+        "current session_id only."
+    ),
+    "default": "lineage",
+}
+
 LCM_GREP = {
     "name": "lcm_grep",
     "description": (
@@ -43,6 +56,7 @@ LCM_GREP = {
                 "default": 10,
             },
             "session_id": _SESSION_ID_PARAM,
+            "scope": _SCOPE_PARAM,
         },
         "required": ["query"],
     },
@@ -66,6 +80,7 @@ LCM_DESCRIBE = {
                 "description": "Summary node ID to inspect. Omit for session overview.",
             },
             "session_id": _SESSION_ID_PARAM,
+            "scope": _SCOPE_PARAM,
         },
         "required": [],
     },
@@ -92,6 +107,7 @@ LCM_EXPAND = {
                 "default": 4000,
             },
             "session_id": _SESSION_ID_PARAM,
+            "scope": _SCOPE_PARAM,
         },
         "required": ["node_id"],
     },
@@ -108,6 +124,7 @@ LCM_STATUS = {
         "type": "object",
         "properties": {
             "session_id": _SESSION_ID_PARAM,
+            "scope": _SCOPE_PARAM,
         },
         "required": [],
     },
@@ -125,6 +142,7 @@ LCM_DOCTOR = {
         "type": "object",
         "properties": {
             "session_id": _SESSION_ID_PARAM,
+            "scope": _SCOPE_PARAM,
         },
         "required": [],
     },
