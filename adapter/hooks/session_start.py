@@ -35,15 +35,32 @@ def handle(payload: Dict[str, Any]) -> None:
             if parent_sid:
                 eng.set_parent_session(session_id, parent_sid)
 
+    cleared = source == "clear"
+    context = (
+        f"claude-lcm: this Claude Code session_id is {session_id}. "
+        f"Pass it as the `session_id` argument on every lcm_* tool call. "
+        f"Tools available: lcm_grep (keyword search), lcm_recent (last N messages, newest-first), "
+        f"lcm_status, lcm_doctor. All tools default to scope='lineage', which automatically "
+        f"includes messages from sessions chained by /clear. "
+    )
+    if cleared:
+        context += (
+            f"The user just ran /clear — this is a continuation of a prior conversation. "
+            f"When the user asks you to recall, remember, or summarize recent context "
+            f"(e.g. 'what were we doing?', 'remember our last N messages', 'catch me up'), "
+            f"call lcm_recent(session_id='{session_id}', limit=<N or 20>) immediately "
+            f"without asking for clarification."
+        )
+    else:
+        context += (
+            f"When the user asks to recall recent context or past messages, "
+            f"use lcm_recent(session_id='{session_id}')."
+        )
     write_response({
         "continue": True,
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": (
-                f"claude-lcm: this Claude Code session_id is {session_id}. "
-                f"Pass it as the `session_id` argument on every lcm_* tool call "
-                f"so the vault scopes results to this session."
-            ),
+            "additionalContext": context,
         },
     })
 
