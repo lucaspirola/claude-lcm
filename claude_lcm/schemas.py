@@ -147,3 +147,26 @@ LCM_DOCTOR = {
         "required": [],
     },
 }
+
+LCM_RECENT = {
+    "name": "lcm_recent",
+    "description": (
+        "Return the most recent N messages from the current session or its "
+        "lineage, newest first. Use this after /clear to recall what was "
+        "being discussed, or to orient yourself at the start of a session. "
+        "For keyword search, use lcm_grep instead."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Number of messages to return (default 10)",
+                "default": 10,
+            },
+            "scope": _SCOPE_PARAM,
+            "session_id": _SESSION_ID_PARAM,
+        },
+        "required": [],
+    },
+}

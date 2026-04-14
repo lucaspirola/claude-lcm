@@ -14,6 +14,7 @@ from claude_lcm.tools import (
     lcm_doctor,
     lcm_expand,
     lcm_grep,
+    lcm_recent,
     lcm_status,
 )
 
@@ -130,4 +131,46 @@ def test_lcm_grep_scope_workspace_crosses_siblings(tmp_path):
     out = json.loads(lcm_grep({"query": "alpha", "scope": "workspace"},
                                engine=eng))
     assert out["total_results"] == 2  # A and B, not Z
+    eng.close()
+
+
+def test_lcm_recent_returns_messages_newest_first(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="A")
+    eng.open_session("A", project_key="-pk")
+    eng.ingest_message({"role": "user", "content": "first message", "timestamp": 1000.0})
+    eng.ingest_message({"role": "assistant", "content": "second message", "timestamp": 2000.0})
+    eng.ingest_message({"role": "user", "content": "third message", "timestamp": 3000.0})
+
+    out = json.loads(lcm_recent({}, engine=eng))
+    assert out["total_results"] == 3
+    assert out["messages"][0]["content"] == "third message"
+    assert out["messages"][-1]["content"] == "first message"
+    eng.close()
+
+
+def test_lcm_recent_limit(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="A")
+    eng.open_session("A", project_key="-pk")
+    for i in range(5):
+        eng.ingest_message({"role": "user", "content": f"msg {i}", "timestamp": float(i)})
+
+    out = json.loads(lcm_recent({"limit": 2}, engine=eng))
+    assert len(out["messages"]) == 2
+    eng.close()
+
+
+def test_lcm_recent_scope_lineage_crosses_clear(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="B")
+    eng.open_session("A", project_key="-pk")
+    eng.open_session("B", project_key="-pk", parent_session_id="A")
+    eng.ingest_message({"role": "user", "content": "from A"}, session_id="A")
+    eng.ingest_message({"role": "user", "content": "from B"}, session_id="B")
+
+    out = json.loads(lcm_recent({"scope": "lineage"}, engine=eng))
+    contents = [m["content"] for m in out["messages"]]
+    assert "from A" in contents
+    assert "from B" in contents
     eng.close()

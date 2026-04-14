@@ -29,6 +29,7 @@ from claude_lcm.schemas import (
     LCM_DOCTOR,
     LCM_EXPAND,
     LCM_GREP,
+    LCM_RECENT,
     LCM_STATUS,
 )
 from claude_lcm.tools import (
@@ -36,6 +37,7 @@ from claude_lcm.tools import (
     lcm_doctor,
     lcm_expand,
     lcm_grep,
+    lcm_recent,
     lcm_status,
 )
 
@@ -47,9 +49,10 @@ HANDLERS = {
     "lcm_expand": lcm_expand,
     "lcm_status": lcm_status,
     "lcm_doctor": lcm_doctor,
+    "lcm_recent": lcm_recent,
 }
 
-SCHEMAS = [LCM_GREP, LCM_DESCRIBE, LCM_EXPAND, LCM_STATUS, LCM_DOCTOR]
+SCHEMAS = [LCM_GREP, LCM_RECENT, LCM_DESCRIBE, LCM_EXPAND, LCM_STATUS, LCM_DOCTOR]
 
 
 def _tool_def(schema: dict) -> types.Tool:

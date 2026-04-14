@@ -307,6 +307,29 @@ class MessageStore:
         ).fetchone()
         return row[0] if row else None
 
+    def recent_messages(self, session_ids: list[str],
+                        limit: int = 10) -> List[Dict[str, Any]]:
+        """Return the most recent `limit` messages across `session_ids`, newest first."""
+        if not session_ids:
+            return []
+        placeholders = ",".join("?" * len(session_ids))
+        rows = self._conn.execute(
+            f"""SELECT store_id, session_id, role, content, timestamp
+                  FROM messages
+                 WHERE session_id IN ({placeholders})
+                 ORDER BY timestamp DESC
+                 LIMIT ?""",
+            (*session_ids, limit),
+        ).fetchall()
+        cols = ("store_id", "session_id", "role", "content", "timestamp")
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            if d["content"] and len(d["content"]) > 500:
+                d["content"] = d["content"][:500] + "\u2026"
+            result.append(d)
+        return result
+
     def close_session(self, session_id: str) -> None:
         self._conn.execute(
             "UPDATE sessions SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL",

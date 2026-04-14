@@ -157,6 +157,26 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     return json.dumps({"query": query, "scope": scope, "total_results": len(results), "results": results[:limit]})
 
 
+def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
+    """Return the most recent N messages from the vault, newest first."""
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "claude-lcm engine not initialized"})
+
+    limit = args.get("limit", 10)
+    scope = args.get("scope", "lineage")
+    if scope not in ("lineage", "workspace", "session"):
+        scope = "lineage"
+
+    session_ids = _resolve_scope_session_ids(engine, scope)
+    messages = engine._store.recent_messages(session_ids, limit=limit)
+    return json.dumps({
+        "scope": scope,
+        "total_results": len(messages),
+        "messages": messages,
+    })
+
+
 def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
     """Inspect a node's subtree or get session overview."""
     engine = _require_engine(kwargs)
