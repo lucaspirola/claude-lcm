@@ -247,3 +247,19 @@ def test_project_key_for_session(tmp_path):
     assert store.project_key_for_session("B") == "-pkB"
     assert store.project_key_for_session("Z") is None
     store.close()
+
+
+def test_search_filters_by_session_ids(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    for sid in ("A", "B", "C"):
+        store.open_session(sid, "claude-code", project_key="-pk")
+        store.append(sid, {"role": "user",
+                           "content": f"hello from {sid}",
+                           "timestamp": 0})
+
+    results = store.search("hello", session_ids=["A", "B"], limit=10)
+    contents = sorted(r["content"] for r in results)
+    assert contents == ["hello from A", "hello from B"]
+    store.close()

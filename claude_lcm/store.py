@@ -472,8 +472,27 @@ class MessageStore:
     # -- Search -------------------------------------------------------------
 
     def search(self, query: str, session_id: str | None = None,
+               session_ids: list[str] | None = None,
                limit: int = 20) -> List[Dict[str, Any]]:
-        if session_id:
+        """FTS5 search across messages.
+
+        At most one of `session_id` or `session_ids` should be provided.
+        If both are None, searches all sessions in the vault.
+        """
+        if session_ids is not None:
+            if not session_ids:
+                return []
+            placeholders = ",".join("?" * len(session_ids))
+            rows = self._conn.execute(
+                f"""SELECT m.*, snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
+                   FROM messages_fts fts
+                   JOIN messages m ON m.store_id = fts.rowid
+                   WHERE messages_fts MATCH ?
+                     AND m.session_id IN ({placeholders})
+                   ORDER BY rank LIMIT ?""",
+                (query, *session_ids, limit),
+            ).fetchall()
+        elif session_id:
             rows = self._conn.execute(
                 """SELECT m.*, snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
                    FROM messages_fts fts
