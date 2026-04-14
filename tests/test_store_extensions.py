@@ -144,3 +144,50 @@ def test_open_session_persists_project_key_and_parent(tmp_path):
     ).fetchone()
     assert row == ("-home-lucas-ai-x", "A")
     store.close()
+
+
+def test_set_end_reason_updates_row(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session(session_id="A", agent_kind="claude-code",
+                       project_key="-pk")
+    store.close_session("A")
+    store.set_end_reason("A", "clear")
+    row = store._conn.execute(
+        "SELECT end_reason FROM sessions WHERE session_id='A'"
+    ).fetchone()
+    assert row[0] == "clear"
+    store.close()
+
+
+def test_upsert_and_take_clear_handoff_roundtrip(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.upsert_clear_handoff(project_key="-pk", ending_session_id="A")
+    assert store.take_clear_handoff("-pk") == "A"
+    # Second take returns None (row was deleted)
+    assert store.take_clear_handoff("-pk") is None
+    store.close()
+
+
+def test_upsert_clear_handoff_overwrites_orphan(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.upsert_clear_handoff(project_key="-pk", ending_session_id="A")
+    store.upsert_clear_handoff(project_key="-pk", ending_session_id="B")
+    assert store.take_clear_handoff("-pk") == "B"
+    store.close()
+
+
+def test_clear_handoff_is_scoped_by_project_key(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.upsert_clear_handoff(project_key="-pkX", ending_session_id="A")
+    store.upsert_clear_handoff(project_key="-pkY", ending_session_id="B")
+    assert store.take_clear_handoff("-pkX") == "A"
+    assert store.take_clear_handoff("-pkY") == "B"
+    store.close()

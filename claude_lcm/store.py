@@ -272,6 +272,52 @@ class MessageStore:
         )
         self._conn.commit()
 
+    def set_end_reason(self, session_id: str, end_reason: str) -> None:
+        self._conn.execute(
+            "UPDATE sessions SET end_reason = ? WHERE session_id = ?",
+            (end_reason, session_id),
+        )
+        self._conn.commit()
+
+    def upsert_clear_handoff(self, project_key: str,
+                             ending_session_id: str) -> None:
+        """Record that a /clear just ended session `ending_session_id`.
+
+        Keyed on project_key — the immediately-following SessionStart
+        hook in the same CC process will pick this up via
+        take_clear_handoff. Safe to call repeatedly: later writes
+        overwrite orphan rows left by a previous /clear whose
+        SessionStart never fired (user quit between the two hooks).
+        """
+        self._conn.execute(
+            """INSERT INTO clear_handoff (project_key, ending_session_id, ts)
+               VALUES (?, ?, ?)
+               ON CONFLICT(project_key) DO UPDATE SET
+                   ending_session_id = excluded.ending_session_id,
+                   ts = excluded.ts""",
+            (project_key, ending_session_id, time.time()),
+        )
+        self._conn.commit()
+
+    def take_clear_handoff(self, project_key: str) -> str | None:
+        """Atomically consume a pending handoff for `project_key`.
+
+        Returns the ending session id if present and deletes the row,
+        or None if no handoff is pending.
+        """
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT ending_session_id FROM clear_handoff WHERE project_key = ?",
+                (project_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "DELETE FROM clear_handoff WHERE project_key = ?",
+                (project_key,),
+            )
+            return row[0]
+
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         row = self._conn.execute(
             """SELECT session_id, agent_kind, workspace_fingerprint,

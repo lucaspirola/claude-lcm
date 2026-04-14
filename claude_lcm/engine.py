@@ -52,6 +52,16 @@ class ClaudeLcmEngine:
     def set_parent_session(self, session_id: str, parent_session_id: str) -> None:
         self._store.set_parent_session(session_id, parent_session_id)
 
+    def set_end_reason(self, session_id: str, end_reason: str) -> None:
+        self._store.set_end_reason(session_id, end_reason)
+
+    def upsert_clear_handoff(self, project_key: str,
+                             ending_session_id: str) -> None:
+        self._store.upsert_clear_handoff(project_key, ending_session_id)
+
+    def take_clear_handoff(self, project_key: str) -> str | None:
+        return self._store.take_clear_handoff(project_key)
+
     def close_session(self, session_id: str | None = None) -> None:
         sid = session_id or self._session_id
         if sid:
