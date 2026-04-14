@@ -62,6 +62,12 @@ class ClaudeLcmEngine:
     def take_clear_handoff(self, project_key: str) -> str | None:
         return self._store.take_clear_handoff(project_key)
 
+    def walk_lineage(self, session_id: str) -> list[str]:
+        return self._store.walk_lineage(session_id)
+
+    def project_key_for_session(self, session_id: str) -> str | None:
+        return self._store.project_key_for_session(session_id)
+
     def close_session(self, session_id: str | None = None) -> None:
         sid = session_id or self._session_id
         if sid:

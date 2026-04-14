@@ -191,3 +191,59 @@ def test_clear_handoff_is_scoped_by_project_key(tmp_path):
     assert store.take_clear_handoff("-pkX") == "A"
     assert store.take_clear_handoff("-pkY") == "B"
     store.close()
+
+
+def test_walk_lineage_single_session(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session(session_id="A", agent_kind="claude-code",
+                       project_key="-pk")
+    assert store.walk_lineage("A") == ["A"]
+    store.close()
+
+
+def test_walk_lineage_chain(tmp_path):
+    """A -> B -> C -> D: walk_lineage(D) returns [D, C, B, A]."""
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session("A", "claude-code", project_key="-pk")
+    store.open_session("B", "claude-code", project_key="-pk",
+                       parent_session_id="A")
+    store.open_session("C", "claude-code", project_key="-pk",
+                       parent_session_id="B")
+    store.open_session("D", "claude-code", project_key="-pk",
+                       parent_session_id="C")
+    assert store.walk_lineage("D") == ["D", "C", "B", "A"]
+    store.close()
+
+
+def test_walk_lineage_fork_via_resume(tmp_path):
+    """A -> B -> C (one chain), A -> D (resume then clear)."""
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session("A", "claude-code", project_key="-pk")
+    store.open_session("B", "claude-code", project_key="-pk",
+                       parent_session_id="A")
+    store.open_session("C", "claude-code", project_key="-pk",
+                       parent_session_id="B")
+    # User --resumes A, then /clears to D -- D's parent is A, not C
+    store.open_session("D", "claude-code", project_key="-pk",
+                       parent_session_id="A")
+    assert store.walk_lineage("D") == ["D", "A"]
+    assert store.walk_lineage("C") == ["C", "B", "A"]
+    store.close()
+
+
+def test_project_key_for_session(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session("A", "claude-code", project_key="-pkA")
+    store.open_session("B", "claude-code", project_key="-pkB")
+    assert store.project_key_for_session("A") == "-pkA"
+    assert store.project_key_for_session("B") == "-pkB"
+    assert store.project_key_for_session("Z") is None
+    store.close()

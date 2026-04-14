@@ -265,6 +265,34 @@ class MessageStore:
         )
         self._conn.commit()
 
+    def walk_lineage(self, session_id: str) -> List[str]:
+        """Return [session_id, parent, grandparent, ...] via recursive CTE.
+
+        The walk stops when parent_session_id is NULL or when a cycle is
+        detected (defensive: the recursive CTE would otherwise loop).
+        """
+        rows = self._conn.execute(
+            """WITH RECURSIVE lineage(sid, depth) AS (
+                   SELECT ?, 0
+                 UNION ALL
+                   SELECT s.parent_session_id, l.depth + 1
+                     FROM sessions s
+                     JOIN lineage l ON s.session_id = l.sid
+                    WHERE s.parent_session_id IS NOT NULL
+                      AND l.depth < 1000
+               )
+               SELECT sid FROM lineage""",
+            (session_id,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def project_key_for_session(self, session_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT project_key FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return row[0] if row else None
+
     def close_session(self, session_id: str) -> None:
         self._conn.execute(
             "UPDATE sessions SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL",
