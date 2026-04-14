@@ -24,6 +24,12 @@ def handle(payload: Dict[str, Any]) -> None:
                     project_key=sanitize_path(cwd),
                     ending_session_id=session_id,
                 )
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "SessionEnd source=clear missing cwd — lineage chain not recorded "
+                    "for session %s", session_id,
+                )
         else:
             eng.set_end_reason(session_id, "normal")
     write_response({"continue": True})

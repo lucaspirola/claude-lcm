@@ -133,6 +133,12 @@ def test_open_session_persists_project_key_and_parent(tmp_path):
     from claude_lcm.store import MessageStore
 
     store = MessageStore(tmp_path / "v.sqlite")
+    # Insert parent "A" first — required now that parent_session_id has a FK constraint
+    store.open_session(
+        session_id="A",
+        agent_kind="claude-code",
+        project_key="-home-lucas-ai-x",
+    )
     store.open_session(
         session_id="B",
         agent_kind="claude-code",

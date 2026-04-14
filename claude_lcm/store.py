@@ -133,7 +133,8 @@ class MessageStore:
             )
         if "parent_session_id" not in existing:
             self._conn.execute(
-                "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT"
+                "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT "
+                "REFERENCES sessions(session_id)"
             )
         if "end_reason" not in existing:
             self._conn.execute(
@@ -150,6 +151,19 @@ class MessageStore:
                 ts                REAL NOT NULL
             )"""
         )
+        # Backfill project_key from workspace_path for vaults created before this migration
+        rows = self._conn.execute(
+            "SELECT session_id, workspace_path FROM sessions "
+            "WHERE project_key IS NULL AND workspace_path IS NOT NULL"
+        ).fetchall()
+        if rows:
+            from claude_lcm.workspace import sanitize_path
+            for sid, wp in rows:
+                self._conn.execute(
+                    "UPDATE sessions SET project_key = ? WHERE session_id = ?",
+                    (sanitize_path(wp), sid),
+                )
+            self._conn.commit()
         self._conn.execute(
             "INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)",
             ("schema_version", "1"),
