@@ -121,6 +121,35 @@ class MessageStore:
             CREATE INDEX IF NOT EXISTS idx_snapshots_hash
                 ON file_snapshots(content_hash);
         """)
+        # --- /clear lineage migration (additive, idempotent) ---
+        existing = {
+            r[1] for r in self._conn.execute(
+                "PRAGMA table_info(sessions)"
+            ).fetchall()
+        }
+        if "project_key" not in existing:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN project_key TEXT"
+            )
+        if "parent_session_id" not in existing:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT"
+            )
+        if "end_reason" not in existing:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN end_reason TEXT"
+            )
+        self._conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_sessions_project_key_ended
+               ON sessions(project_key, ended_at DESC)"""
+        )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS clear_handoff (
+                project_key       TEXT PRIMARY KEY,
+                ending_session_id TEXT NOT NULL,
+                ts                REAL NOT NULL
+            )"""
+        )
         self._conn.execute(
             "INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)",
             ("schema_version", "1"),

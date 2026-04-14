@@ -94,3 +94,36 @@ def test_message_round_trip_and_fts_search(store: MessageStore):
     assert len(hits) == 1
     assert hits[0]["role"] == "user"
     assert "payment" in hits[0]["snippet"].lower()
+
+
+def test_store_init_adds_project_key_and_handoff(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    db = tmp_path / "v.sqlite"
+    store = MessageStore(db)
+
+    cols = {r[1] for r in store._conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    assert {"project_key", "parent_session_id", "end_reason"} <= cols
+
+    tables = {r[0] for r in store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert "clear_handoff" in tables
+
+    # Index exists
+    idx = {r[0] for r in store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    ).fetchall()}
+    assert "idx_sessions_project_key_ended" in idx
+
+    store.close()
+
+
+def test_store_init_is_idempotent_on_existing_vault(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    db = tmp_path / "v.sqlite"
+    MessageStore(db).close()
+    # Re-open — must not raise "duplicate column" or similar.
+    store = MessageStore(db)
+    store.close()
