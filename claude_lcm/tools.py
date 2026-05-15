@@ -178,21 +178,46 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
 
 
 def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
-    """Inspect a node's subtree or get session overview."""
+    """Describe a file snapshot (by id or path) or return a session overview."""
+    import os
+    from datetime import datetime, timezone
+
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "claude-lcm engine not initialized"})
 
-    node_id = args.get("node_id")
+    id_arg = args.get("id")
     session_id = engine._session_id
 
-    if node_id is not None:
-        node = _get_session_node(engine, node_id)
-        if node is None:
-            return json.dumps({"error": f"Node {node_id} not found in current session"})
-        info = engine._dag.describe_subtree(node_id)
-        return json.dumps(info)
+    # ── file snapshot lookup ────────────────────────────────────────────────
+    if id_arg is not None:
+        if isinstance(id_arg, int):
+            snap = engine._store.get_file_snapshot(id_arg)
+        else:
+            caller_session = args.get("session_id") or session_id
+            lineage = engine._store.walk_lineage(caller_session) if caller_session else None
+            snap = engine._store.get_latest_snapshot_for_path(str(id_arg), session_ids=lineage)
 
+        if snap is None:
+            return json.dumps({"error": "not found", "id": id_arg})
+
+        captured_ts = snap.get("captured_at")
+        captured_iso = (
+            datetime.fromtimestamp(captured_ts, tz=timezone.utc).isoformat()
+            if captured_ts else None
+        )
+        return json.dumps({
+            "snapshot_id": snap["snapshot_id"],
+            "path": snap["file_path"],
+            "extension": os.path.splitext(snap["file_path"])[1],
+            "size_bytes": snap["size_bytes"],
+            "captured_at": captured_iso,
+            "session_id": snap["session_id"],
+            "op": snap["op"],
+            "exploration_summary": snap.get("exploration_summary"),
+        })
+
+    # ── session overview (backward compat, no id provided) ──────────────────
     all_nodes = engine._dag.get_session_nodes(session_id)
     overview = {
         "session_id": session_id,

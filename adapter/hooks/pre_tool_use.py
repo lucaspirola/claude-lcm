@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from adapter.hooks._common import engine_for, safe_main, write_response
+from claude_lcm.explorer import explore
 
 SNAPSHOT_TOOLS = {"Read", "Edit", "Write", "NotebookEdit"}
 
@@ -53,12 +54,14 @@ def handle(payload: Dict[str, Any]) -> None:
             )
             if file_path:
                 content = _read_file_bytes(str(file_path))
+                summary = explore(str(file_path), content)
                 if content is not None:
                     eng.ingest_file_snapshot(
                         file_path=str(file_path),
                         op="pre_" + tool_name.lower(),
                         content=content,
                         message_id=mid,
+                        exploration_summary=summary,
                     )
                 else:
                     eng.ingest_file_snapshot(
@@ -67,6 +70,7 @@ def handle(payload: Dict[str, Any]) -> None:
                         content=None,
                         external_uri=f"missing-or-oversize://{file_path}",
                         message_id=mid,
+                        exploration_summary=summary,
                     )
     write_response({"continue": True})
 

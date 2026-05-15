@@ -30,12 +30,18 @@ def handle(payload: Dict[str, Any]) -> None:
                 "transcript_path": payload.get("transcript_path"),
             },
         )
-        if source == "clear" and project_key:
-            parent_sid = eng.take_clear_handoff(project_key)
+        parent_sid = None
+        if project_key:
+            if source == "clear":
+                parent_sid = eng.take_clear_handoff(project_key)
+            if parent_sid is None:
+                # Fresh `claude` start (no /clear handoff) — auto-link to the
+                # most recent prior session in this workspace so lineage scope works.
+                parent_sid = eng.latest_session_for_project(project_key, exclude_session_id=session_id)
             if parent_sid:
                 eng.set_parent_session(session_id, parent_sid)
 
-    cleared = source == "clear"
+    has_prior = parent_sid is not None
     context = (
         f"claude-lcm: this Claude Code session_id is {session_id}. "
         f"Pass it as the `session_id` argument on every lcm_* tool call. "
@@ -43,9 +49,9 @@ def handle(payload: Dict[str, Any]) -> None:
         f"lcm_status, lcm_doctor. All tools default to scope='lineage', which automatically "
         f"includes messages from sessions chained by /clear. "
     )
-    if cleared:
+    if has_prior:
         context += (
-            f"The user just ran /clear — this is a continuation of a prior conversation. "
+            f"This session is linked to a prior conversation in the same workspace. "
             f"When the user asks you to recall, remember, or summarize recent context "
             f"(e.g. 'what were we doing?', 'remember our last N messages', 'catch me up'), "
             f"call lcm_recent(session_id='{session_id}', limit=<N or 20>) immediately "

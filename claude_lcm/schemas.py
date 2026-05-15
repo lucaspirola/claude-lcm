@@ -65,23 +65,24 @@ LCM_GREP = {
 LCM_DESCRIBE = {
     "name": "lcm_describe",
     "description": (
-        "Inspect a summary node's subtree metadata WITHOUT loading full "
-        "content. Returns token counts, child manifest, and expand hints. "
-        "Use this to plan retrieval strategy before spending tokens on "
-        "lcm_expand. If called with no node_id, returns the top-level "
-        "overview for the current session. In v1 (no compaction) this "
-        "returns a session message summary rather than a DAG tree."
+        "Return metadata for a file snapshot or summary node. "
+        "Pass a snapshot_id (int) or a file path (string) as `id`. "
+        "For paths, pass session_id to scope to a lineage; omit for vault-global latest. "
+        "Omit `id` entirely to get a session overview (message count, DAG status). "
+        "In v1 the DAG is empty; integer IDs resolve to file snapshots only."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "node_id": {
-                "type": "integer",
-                "description": "Summary node ID to inspect. Omit for session overview.",
+            "id": {
+                "type": ["string", "integer"],
+                "description": "snapshot_id (int) or file path (string). Omit for session overview.",
             },
             "session_id": _SESSION_ID_PARAM,
             "scope": _SCOPE_PARAM,
         },
+        # `id` is intentionally optional: omitting it triggers the session
+        # overview (backward compat). When present it performs a snapshot lookup.
         "required": [],
     },
 }

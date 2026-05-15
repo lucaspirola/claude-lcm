@@ -151,6 +151,16 @@ class MessageStore:
                 ts                REAL NOT NULL
             )"""
         )
+        # --- exploration_summary migration (additive, idempotent) ---
+        fs_cols = {
+            r[1] for r in self._conn.execute(
+                "PRAGMA table_info(file_snapshots)"
+            ).fetchall()
+        }
+        if "exploration_summary" not in fs_cols:
+            self._conn.execute(
+                "ALTER TABLE file_snapshots ADD COLUMN exploration_summary TEXT"
+            )
         # Backfill project_key from workspace_path for vaults created before this migration
         rows = self._conn.execute(
             "SELECT session_id, workspace_path FROM sessions "
@@ -364,6 +374,29 @@ class MessageStore:
         )
         self._conn.commit()
 
+    def latest_session_for_project(self, project_key: str,
+                                    exclude_session_id: str | None = None) -> str | None:
+        """Return the most recently started session_id for project_key.
+
+        Used by SessionStart to auto-link a fresh `claude` invocation to the
+        prior session in the same workspace, even when no /clear handoff exists.
+        """
+        if exclude_session_id:
+            row = self._conn.execute(
+                """SELECT session_id FROM sessions
+                    WHERE project_key = ? AND session_id != ?
+                    ORDER BY started_at DESC LIMIT 1""",
+                (project_key, exclude_session_id),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """SELECT session_id FROM sessions
+                    WHERE project_key = ?
+                    ORDER BY started_at DESC LIMIT 1""",
+                (project_key,),
+            ).fetchone()
+        return row[0] if row else None
+
     def take_clear_handoff(self, project_key: str) -> str | None:
         """Atomically consume a pending handoff for `project_key`.
 
@@ -431,7 +464,8 @@ class MessageStore:
     def append_file_snapshot(self, session_id: str, file_path: str, op: str,
                              content: bytes | None = None,
                              external_uri: str | None = None,
-                             message_id: int | None = None) -> int:
+                             message_id: int | None = None,
+                             exploration_summary: str | None = None) -> int:
         """Append a file snapshot. One of `content` or `external_uri` must be set.
 
         In v1 we populate `content_blob` inline. v3 will flip to `external_uri`
@@ -447,13 +481,80 @@ class MessageStore:
         cur = self._conn.execute(
             """INSERT INTO file_snapshots
                (session_id, message_id, file_path, content_hash,
-                content_blob, external_uri, captured_at, op)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                content_blob, external_uri, captured_at, op, exploration_summary)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, message_id, file_path, content_hash,
-             content, external_uri, time.time(), op),
+             content, external_uri, time.time(), op, exploration_summary),
         )
         self._conn.commit()
         return cur.lastrowid
+
+    def get_file_snapshot(self, snapshot_id: int) -> Optional[Dict[str, Any]]:
+        """Look up a file snapshot by its primary key. Returns None if not found."""
+        row = self._conn.execute(
+            """SELECT snapshot_id, session_id, file_path, op,
+                      content_blob, external_uri, captured_at, exploration_summary
+               FROM file_snapshots WHERE snapshot_id = ?""",
+            (snapshot_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        blob = row[4]
+        return {
+            "snapshot_id": row[0],
+            "session_id": row[1],
+            "file_path": row[2],
+            "op": row[3],
+            "size_bytes": len(blob) if blob is not None else 0,
+            "external_uri": row[5],
+            "captured_at": row[6],
+            "exploration_summary": row[7],
+        }
+
+    def get_latest_snapshot_for_path(
+        self,
+        file_path: str,
+        session_ids: list[str] | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the most recent file snapshot for `file_path`.
+
+        If `session_ids` is provided, restricts to those sessions (lineage walk).
+        If None, searches across the entire vault (vault-global).
+        """
+        if session_ids is not None:
+            if not session_ids:
+                return None
+            placeholders = ",".join("?" * len(session_ids))
+            row = self._conn.execute(
+                f"""SELECT snapshot_id, session_id, file_path, op,
+                           content_blob, external_uri, captured_at, exploration_summary
+                    FROM file_snapshots
+                    WHERE file_path = ? AND session_id IN ({placeholders})
+                    ORDER BY captured_at DESC LIMIT 1""",
+                (file_path, *session_ids),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """SELECT snapshot_id, session_id, file_path, op,
+                          content_blob, external_uri, captured_at, exploration_summary
+                   FROM file_snapshots
+                   WHERE file_path = ?
+                   ORDER BY captured_at DESC LIMIT 1""",
+                (file_path,),
+            ).fetchone()
+        if row is None:
+            return None
+        blob = row[4]
+        return {
+            "snapshot_id": row[0],
+            "session_id": row[1],
+            "file_path": row[2],
+            "op": row[3],
+            "size_bytes": len(blob) if blob is not None else 0,
+            "external_uri": row[5],
+            "captured_at": row[6],
+            "exploration_summary": row[7],
+        }
 
     # -- Read operations ----------------------------------------------------
 

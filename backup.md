@@ -73,8 +73,34 @@ bb4aefb feat(store): clear_handoff upsert/take + set_end_reason
 - Compaction / summary DAG (v2)
 - `lcm adopt` recovery tool for renamed folders
 
-## Next things that came up but were deferred
+## Latest change (2026-04-14, session f43cf894)
 
-- `lcm_recent` UX: user wants "remember our past 50 messages" to work without
-  specifying tool name. Fix: update SessionStart `additionalContext` to instruct
-  Claude to call `lcm_recent` proactively when the user asks to recall context.
+### Recall intent: hook pre-fetches messages, no tool call needed
+
+When the user's prompt contains a recall phrase ("remember our last N messages",
+"catch me up", "what were we doing", etc.), `UserPromptSubmit` now detects it,
+fetches the messages from the vault directly, and injects them as `additionalContext`.
+Claude receives the data without needing to call any tool.
+
+Patterns detected: remember, recall, catch me up, what were we, what did we,
+restore context, prior context, recent messages/context/history, past/last N messages.
+
+Numeric limit is parsed from the prompt; defaults to 20 if no number found.
+
+Files changed: `adapter/hooks/user_prompt_submit.py`, `claude_lcm/engine.py` (new `recent_messages_lineage`).
+
+### Fresh `claude` start now auto-links to prior session
+
+Previously, killing CC and restarting with plain `claude` (no `--resume`, no `/clear`)
+left the new session unlinked — `lcm_recent scope=lineage` only saw the empty new session.
+
+Fix: `SessionStart` now calls `latest_session_for_project(project_key, exclude=self)`
+when there is no `/clear` handoff. If a prior session exists for the same workspace,
+it is stamped as `parent_session_id` automatically.
+
+Files changed:
+- `claude_lcm/store.py` — `latest_session_for_project()`
+- `claude_lcm/engine.py` — passthrough
+- `adapter/hooks/session_start.py` — auto-link on fresh start; unified "has_prior" context
+
+53 tests pass.

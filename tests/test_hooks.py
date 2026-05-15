@@ -313,3 +313,116 @@ def test_clear_chains_do_not_cross_projects(tmp_path: Path):
         "SELECT parent_session_id FROM sessions WHERE session_id='A2'"
     ).fetchone()
     assert row == ("A",)
+
+
+def test_fresh_start_auto_links_to_prior_session(tmp_path: Path):
+    """A plain `claude` start (no /clear) auto-links to the most recent prior session.
+
+    This covers the case where the user kills CC and restarts without --resume.
+    The new session should be linked so that lcm_recent scope=lineage works.
+    """
+    vault = tmp_path / "v.sqlite"
+    cwd = str(tmp_path)
+
+    # Session A: a normal session that ended without /clear
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A", "cwd": cwd, "source": "startup"}, vault)
+    _run_hook("adapter.hooks.user_prompt_submit",
+              {"session_id": "A", "prompt": "hello from A"}, vault)
+    # No SessionEnd / no clear handoff — simulates killing the process
+
+    # Session B: fresh `claude` start (source omitted / None)
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "B", "cwd": cwd}, vault)
+
+    row = sqlite3.connect(vault).execute(
+        "SELECT parent_session_id FROM sessions WHERE session_id='B'"
+    ).fetchone()
+    assert row == ("A",), f"expected parent=A, got {row}"
+
+
+def test_fresh_start_does_not_cross_projects(tmp_path: Path):
+    """Auto-link must not pick up sessions from a different workspace."""
+    vault = tmp_path / "v.sqlite"
+    proj_x = tmp_path / "x"; proj_x.mkdir()
+    proj_y = tmp_path / "y"; proj_y.mkdir()
+
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A", "cwd": str(proj_x), "source": "startup"}, vault)
+
+    # B starts fresh in project Y — must not link to A (different project)
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "B", "cwd": str(proj_y)}, vault)
+    row = sqlite3.connect(vault).execute(
+        "SELECT parent_session_id FROM sessions WHERE session_id='B'"
+    ).fetchone()
+    assert row == (None,)
+
+
+# ---------------------------------------------------------------------------
+# Recall-intent injection tests
+# ---------------------------------------------------------------------------
+
+def test_recall_intent_injects_messages(tmp_path: Path):
+    """When the prompt contains a recall phrase, additionalContext includes vault messages."""
+    vault = tmp_path / "v.sqlite"
+    cwd = str(tmp_path)
+
+    # Seed a prior session with a message
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A", "cwd": cwd, "source": "startup"}, vault)
+    _run_hook("adapter.hooks.user_prompt_submit",
+              {"session_id": "A", "prompt": "hello from session A"}, vault)
+
+    # New session auto-linked to A
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "B", "cwd": cwd}, vault)
+
+    # Recall-intent prompt in session B
+    _, stdout, _ = _run_hook("adapter.hooks.user_prompt_submit",
+                              {"session_id": "B", "prompt": "remember our last 5 messages"}, vault)
+
+    out = json.loads(stdout)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "lcm:" in ctx, "should include lcm header"
+    assert "hello from session A" in ctx, "should include prior message content"
+
+
+def test_non_recall_prompt_does_not_inject(tmp_path: Path):
+    """A regular prompt must not inject message history."""
+    vault = tmp_path / "v.sqlite"
+    cwd = str(tmp_path)
+
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "A", "cwd": cwd}, vault)
+    _run_hook("adapter.hooks.user_prompt_submit",
+              {"session_id": "A", "prompt": "what is 2+2?"}, vault)
+
+    _, stdout, _ = _run_hook("adapter.hooks.user_prompt_submit",
+                              {"session_id": "A", "prompt": "explain this function"}, vault)
+    out = json.loads(stdout)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "lcm:" not in ctx or "recent messages" not in ctx
+
+
+@pytest.mark.parametrize("prompt", [
+    "remember our past 10 messages",
+    "recall what we were doing",
+    "catch me up",
+    "what were we working on?",
+    "what did we decide about the schema?",
+    "restore context please",
+    "show me the last 20 messages",
+])
+def test_recall_patterns_detected(prompt: str):
+    """All recall-intent phrases should be detected."""
+    from adapter.hooks.user_prompt_submit import _is_recall_intent
+    assert _is_recall_intent(prompt), f"should detect recall in: {prompt!r}"
+
+
+def test_limit_extraction():
+    """Numeric limit should be parsed from the prompt."""
+    from adapter.hooks.user_prompt_submit import _extract_limit
+    assert _extract_limit("remember our last 30 messages") == 30
+    assert _extract_limit("past 7 messages please") == 7
+    assert _extract_limit("catch me up") == 20  # default

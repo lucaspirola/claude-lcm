@@ -62,11 +62,20 @@ class ClaudeLcmEngine:
                              ending_session_id: str) -> None:
         self._store.upsert_clear_handoff(project_key, ending_session_id)
 
+    def latest_session_for_project(self, project_key: str,
+                                    exclude_session_id: str | None = None) -> str | None:
+        return self._store.latest_session_for_project(project_key, exclude_session_id)
+
     def take_clear_handoff(self, project_key: str) -> str | None:
         return self._store.take_clear_handoff(project_key)
 
     def walk_lineage(self, session_id: str) -> list[str]:
         return self._store.walk_lineage(session_id)
+
+    def recent_messages_lineage(self, session_id: str, limit: int = 20) -> list[dict]:
+        """Return the most recent `limit` messages across the full lineage, newest first."""
+        session_ids = self._store.walk_lineage(session_id)
+        return self._store.recent_messages(session_ids, limit)
 
     def project_key_for_session(self, session_id: str) -> str | None:
         return self._store.project_key_for_session(session_id)
@@ -114,7 +123,8 @@ class ClaudeLcmEngine:
                              content: bytes | None = None,
                              external_uri: str | None = None,
                              message_id: int | None = None,
-                             session_id: str | None = None) -> int:
+                             session_id: str | None = None,
+                             exploration_summary: str | None = None) -> int:
         sid = session_id or self._session_id
         if not sid:
             raise RuntimeError("no active session — call open_session first")
@@ -131,6 +141,7 @@ class ClaudeLcmEngine:
             content=content,
             external_uri=external_uri,
             message_id=message_id,
+            exploration_summary=exploration_summary,
         )
 
     # -- Query --------------------------------------------------------------

@@ -255,6 +255,166 @@ def test_project_key_for_session(tmp_path):
     store.close()
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Explorer tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_explorer_py_extracts_functions_and_classes():
+    from claude_lcm.explorer import explore
+    blob = b"def foo():\n    pass\n\nasync def bar():\n    pass\n\nclass Baz:\n    pass\n"
+    result = explore("/fake/file.py", blob)
+    assert result is not None
+    assert "foo" in result
+    assert "bar" in result
+    assert "Baz" in result
+
+
+def test_explorer_json_extracts_top_level_keys():
+    import json as _json
+    from claude_lcm.explorer import explore
+    blob = _json.dumps({"name": "alice", "items": [1, 2], "meta": {}}).encode()
+    result = explore("/fake/data.json", blob)
+    assert result is not None
+    assert "name" in result
+    assert "items" in result
+    assert "meta" in result
+
+
+def test_explorer_sql_extracts_table_and_view_names():
+    from claude_lcm.explorer import explore
+    blob = b"CREATE TABLE users (id INT);\nCREATE VIEW active_users AS SELECT * FROM users;\n"
+    result = explore("/fake/schema.sql", blob)
+    assert result is not None
+    assert "tables:" in result
+    assert "users" in result
+    assert "views:" in result
+    assert "active_users" in result
+
+
+def test_explorer_text_fallback_shows_first_and_last_lines():
+    from claude_lcm.explorer import explore
+    lines = [f"line {i}" for i in range(40)]
+    blob = "\n".join(lines).encode()
+    result = explore("/fake/notes.txt", blob)
+    assert result is not None
+    assert "line 0" in result
+    assert "line 39" in result
+    assert "line 20" not in result  # middle line excluded by first-20 + last-10 strategy
+
+
+def test_explorer_none_blob_returns_none():
+    from claude_lcm.explorer import explore
+    assert explore("/fake/file.py", None) is None
+
+
+def test_explorer_binary_blob_returns_none_without_raising():
+    from claude_lcm.explorer import explore
+    result = explore("/fake/file.py", b"\x00\xff\xfe")
+    assert result is None  # UTF-8 decode fails → except → None
+
+
+def test_explorer_caps_output_at_2000_chars():
+    from claude_lcm.explorer import explore
+    lines = [f"def func_{i}(): pass" for i in range(200)]
+    blob = "\n".join(lines).encode()
+    result = explore("/fake/big.py", blob)
+    assert result is not None
+    assert len(result) <= 2000
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# exploration_summary column + store read methods
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_file_snapshots_has_exploration_summary_column(store: MessageStore):
+    cols = {r[1] for r in store._conn.execute(
+        "PRAGMA table_info(file_snapshots)"
+    ).fetchall()}
+    assert "exploration_summary" in cols
+
+
+def test_append_file_snapshot_stores_exploration_summary(store: MessageStore):
+    store.open_session("s_sum", "claude-code")
+    sid = store.append_file_snapshot(
+        "s_sum", file_path="/tmp/foo.py", op="write",
+        content=b"def foo(): pass",
+        exploration_summary="functions: foo",
+    )
+    row = store._conn.execute(
+        "SELECT exploration_summary FROM file_snapshots WHERE snapshot_id=?", (sid,)
+    ).fetchone()
+    assert row[0] == "functions: foo"
+
+
+def test_append_file_snapshot_exploration_summary_defaults_none(store: MessageStore):
+    store.open_session("s_sum2", "claude-code")
+    sid = store.append_file_snapshot(
+        "s_sum2", file_path="/tmp/bar.py", op="read", content=b"x=1",
+    )
+    row = store._conn.execute(
+        "SELECT exploration_summary FROM file_snapshots WHERE snapshot_id=?", (sid,)
+    ).fetchone()
+    assert row[0] is None
+
+
+def test_get_file_snapshot_by_id(store: MessageStore):
+    store.open_session("s_gfs", "claude-code")
+    sid = store.append_file_snapshot(
+        "s_gfs", file_path="/tmp/a.py", op="read",
+        content=b"print('hi')",
+        exploration_summary="functions: main",
+    )
+    snap = store.get_file_snapshot(sid)
+    assert snap is not None
+    assert snap["snapshot_id"] == sid
+    assert snap["file_path"] == "/tmp/a.py"
+    assert snap["op"] == "read"
+    assert snap["exploration_summary"] == "functions: main"
+    assert snap["size_bytes"] == len(b"print('hi')")
+
+
+def test_get_file_snapshot_returns_none_for_missing_id(store: MessageStore):
+    assert store.get_file_snapshot(999999) is None
+
+
+def test_get_latest_snapshot_for_path_by_session(tmp_path: Path):
+    s = MessageStore(tmp_path / "v.sqlite")
+    s.open_session("A", "claude-code", project_key="-pk")
+    s.open_session("B", "claude-code", project_key="-pk", parent_session_id="A")
+    # Use explicit captured_at values to avoid relying on wall-clock ordering.
+    s._conn.execute(
+        """INSERT INTO file_snapshots
+           (session_id, file_path, content_hash, content_blob, captured_at, op, exploration_summary)
+           VALUES ('A', '/tmp/x.py', 'hash1', 'old', 1000.0, 'read', 'old')"""
+    )
+    s._conn.execute(
+        """INSERT INTO file_snapshots
+           (session_id, file_path, content_hash, content_blob, captured_at, op, exploration_summary)
+           VALUES ('B', '/tmp/x.py', 'hash2', 'new', 2000.0, 'write', 'new')"""
+    )
+    s._conn.commit()
+    lineage = s.walk_lineage("B")
+    snap = s.get_latest_snapshot_for_path("/tmp/x.py", session_ids=lineage)
+    assert snap is not None
+    assert snap["exploration_summary"] == "new"
+    s.close()
+
+
+def test_get_latest_snapshot_for_path_vault_global(tmp_path: Path):
+    s = MessageStore(tmp_path / "v.sqlite")
+    s.open_session("X", "claude-code", project_key="-pk")
+    s.append_file_snapshot("X", file_path="/tmp/y.py", op="read",
+                           content=b"code", exploration_summary="global")
+    snap = s.get_latest_snapshot_for_path("/tmp/y.py", session_ids=None)
+    assert snap is not None
+    assert snap["exploration_summary"] == "global"
+    s.close()
+
+
+def test_get_latest_snapshot_for_path_returns_none_when_missing(store: MessageStore):
+    assert store.get_latest_snapshot_for_path("/nonexistent/path.py") is None
+
+
 def test_search_filters_by_session_ids(tmp_path):
     from claude_lcm.store import MessageStore
 

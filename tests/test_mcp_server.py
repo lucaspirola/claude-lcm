@@ -161,6 +161,53 @@ def test_lcm_recent_limit(tmp_path):
     eng.close()
 
 
+def test_lcm_describe_by_snapshot_id(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    sid = eng.ingest_file_snapshot(
+        file_path="/tmp/foo.py", op="read",
+        content=b"def foo(): pass",
+        exploration_summary="functions: foo",
+    )
+    out = json.loads(lcm_describe({"id": sid}, engine=eng))
+    assert "error" not in out
+    assert out["snapshot_id"] == sid
+    assert out["path"] == "/tmp/foo.py"
+    assert out["extension"] == ".py"
+    assert out["op"] == "read"
+    assert out["exploration_summary"] == "functions: foo"
+    eng.close()
+
+
+def test_lcm_describe_by_path(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_file_snapshot(
+        file_path="/tmp/bar.py", op="read", content=b"x=1",
+    )
+    out = json.loads(lcm_describe({"id": "/tmp/bar.py", "session_id": "s"}, engine=eng))
+    assert "error" not in out
+    assert out["path"] == "/tmp/bar.py"
+    assert out["extension"] == ".py"
+    eng.close()
+
+
+def test_lcm_describe_not_found(engine):
+    out = json.loads(lcm_describe({"id": 99999}, engine=engine))
+    assert "error" in out
+    out2 = json.loads(lcm_describe({"id": "/nonexistent/path.py"}, engine=engine))
+    assert "error" in out2
+
+
+def test_lcm_describe_session_overview_unchanged(engine):
+    """No id → session overview still works (backward compat)."""
+    out = json.loads(lcm_describe({}, engine=engine))
+    assert out["session_id"] == "s"
+    assert "store_message_count" in out
+
+
 def test_lcm_recent_scope_lineage_crosses_clear(tmp_path):
     cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
     eng = ClaudeLcmEngine(config=cfg, session_id="B")
