@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -68,8 +69,7 @@ def _resolve_scope_session_ids(engine: "ClaudeLcmEngine",
 
 
 def _require_engine(kwargs: Dict[str, Any]) -> "ClaudeLcmEngine | None":
-    engine = kwargs.get("engine")
-    return engine if engine is not None else None
+    return kwargs.get("engine")
 
 
 def _get_session_node(engine: "ClaudeLcmEngine", node_id: int):
@@ -153,8 +153,9 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         # if that also fails, surface the error explicitly.
         logger.debug("FTS5 search failed (%s); retrying as literal", exc)
         try:
+            effective_query = _fts5_quote(query)
             msg_hits = engine._store.search(
-                _fts5_quote(query), session_ids=session_ids, limit=limit
+                effective_query, session_ids=session_ids, limit=limit
             )
             match_mode = "literal"
         except Exception as exc2:
@@ -176,7 +177,9 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         )
 
     try:
-        node_hits = engine._dag.search(query, session_id=session_id, limit=limit)
+        # effective_query reflects the literal-mode fallback above, keeping the
+        # DAG search consistent with the message search.
+        node_hits = engine._dag.search(effective_query, session_id=session_id, limit=limit)
         for node in node_hits:
             results.append(
                 {
@@ -223,7 +226,6 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
 
 def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
     """Describe a file snapshot (by id or path) or return a session overview."""
-    import os
     from datetime import datetime, timezone
 
     engine = _require_engine(kwargs)
@@ -487,9 +489,6 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 # Structured tool-call access, identity, and markers (claude-lcm extensions)
 # ----------------------------------------------------------------------------
 
-_RESULT_ROLES = ("tool", "tool_result")
-
-
 def _normalize_tool_call(call: Any) -> Dict[str, Any]:
     """Best-effort normalization of a stored tool_call into {name, args, id}.
 
@@ -522,6 +521,11 @@ def lcm_tool_calls(args: Dict[str, Any], **kwargs) -> str:
     Defaults to scope='session' (point-in-time audits). group_by='call' returns a
     flat list of calls newest-first; group_by='turn' groups calls under the
     assistant turn that issued them.
+
+    Pairing uses tool_call_id when present, else falls back to FIFO same-tool-name
+    adjacency; because Claude Code hook payloads frequently omit tool_call_id,
+    results from interleaved same-name calls may be paired in call order and can
+    mispair if results arrive out of order — treat `result` as best-effort.
     """
     engine = _require_engine(kwargs)
     if engine is None:
@@ -544,7 +548,9 @@ def lcm_tool_calls(args: Dict[str, Any], **kwargs) -> str:
             "hint": "pass session_id (from the SessionStart context)",
         })
 
-    rows = engine._store.tool_call_rows(session_ids, limit=max(limit * 8, 200))
+    rows = engine._store.tool_call_rows(
+        session_ids, limit=max(limit * 8, 200), tool_name=tool_name
+    )
 
     turns: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []  # call records awaiting a result
@@ -614,6 +620,7 @@ def lcm_tool_calls(args: Dict[str, Any], **kwargs) -> str:
 
     calls = [c for turn in turns for c in turn["tool_calls"]]
     if tool_name:
+        # redundant for call-mode after the SQL filter; still needed for turn-mode aggregation
         calls = [c for c in calls if c["tool_name"] == tool_name]
     calls.sort(key=lambda c: (c["store_id"] or 0), reverse=True)
     calls = calls[:limit]
@@ -632,13 +639,13 @@ def lcm_whoami(args: Dict[str, Any], **kwargs) -> str:
     best-effort: resolve via CLAUDE_PROJECT_DIR to the most recent session in
     this workspace — flagged so callers know it may be wrong under concurrency.
     """
-    import os
-
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "claude-lcm engine not initialized"})
 
-    session_id = engine._session_id
+    # The MCP server normally pops session_id into the engine; honor an explicit
+    # args["session_id"] as a fallback (engine value takes precedence).
+    session_id = engine._session_id or args.get("session_id")
     resolved_via = "session_id"
     warning = None
     if not session_id:
@@ -690,6 +697,8 @@ def lcm_mark(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "name is required"})
     store_id = args.get("store_id")
     metadata = args.get("metadata")
+    if store_id is not None and engine._store.get(store_id) is None:
+        return json.dumps({"error": "store_id not found", "store_id": store_id})
     try:
         mark_id = engine._store.add_mark(
             session_id, name, store_id=store_id, metadata=metadata
@@ -717,6 +726,11 @@ def lcm_marks(args: Dict[str, Any], **kwargs) -> str:
     name = args.get("name")
     limit = args.get("limit", 50)
     session_ids = _resolve_scope_session_ids(engine, scope)
+    if not session_ids:
+        return json.dumps({
+            "error": "No active session",
+            "hint": "pass session_id (from the SessionStart context)",
+        })
     marks = engine._store.get_marks(session_ids, name=name, limit=limit)
     return json.dumps({
         "scope": scope,

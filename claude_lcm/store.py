@@ -753,22 +753,28 @@ class MessageStore:
     # -- Structured tool-call access (claude-lcm extension) ---------------
 
     def tool_call_rows(self, session_ids: List[str] | None = None,
-                       limit: int = 200) -> List[Dict[str, Any]]:
-        """Return tool-related message rows (tool_use + tool_result), oldest-first,
-        so callers can reconstruct call/result pairs and assistant turns."""
+                       limit: int = 200,
+                       tool_name: str | None = None) -> List[Dict[str, Any]]:
+        """Return the newest `limit` tool-related message rows (tool_use +
+        tool_result) in chronological (ascending store_id) order, so callers can
+        reconstruct call/result pairs and assistant turns from the newest window."""
         sql = (
             "SELECT * FROM messages "
-            "WHERE tool_calls IS NOT NULL OR tool_name IS NOT NULL "
-            "OR tool_call_id IS NOT NULL"
+            "WHERE (tool_calls IS NOT NULL OR tool_name IS NOT NULL "
+            "OR tool_call_id IS NOT NULL)"
         )
         params: List[Any] = []
         if session_ids:
             placeholders = ",".join("?" * len(session_ids))
             sql += f" AND session_id IN ({placeholders})"
             params.extend(session_ids)
-        sql += " ORDER BY store_id ASC LIMIT ?"
+        if tool_name is not None:
+            sql += " AND tool_name = ?"
+            params.append(tool_name)
+        sql += " ORDER BY store_id DESC LIMIT ?"
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
+        rows = list(reversed(rows))  # newest window, returned chronologically for pairing
         return [self._row_to_dict(r) for r in rows]
 
     def session_has_rows(self, session_id: str) -> bool:

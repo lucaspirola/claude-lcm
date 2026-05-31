@@ -38,20 +38,20 @@ def _open(engine, session_id, project_key=None, workspace_path=None,
     )
 
 
-def _ingest_tool_call(engine, call_id, name, args, result):
+def _ingest_tool_call(engine, call_id, name, args, result, session_id=None):
     """Mirror the pre/post tool-use hooks: a tool_use row then a tool_result row."""
     engine.ingest_message({
         "role": "assistant",
         "content": None,
         "tool_calls": [{"id": call_id, "name": name, "arguments": args}],
         "tool_name": name,
-    })
+    }, session_id=session_id)
     engine.ingest_message({
         "role": "tool",
         "content": result,
         "tool_call_id": call_id,
         "tool_name": name,
-    })
+    }, session_id=session_id)
 
 
 # --------------------------------------------------------------------------
@@ -221,16 +221,16 @@ def test_scope_auto_prefers_session_when_rows_exist(vault_path):
     eng = _engine("CHILD")
     _open(eng, "PARENT")
     _open(eng, "CHILD", parent_session_id="PARENT")
-    # rows in both sessions, distinguishable content
-    eng.ingest_message({"role": "user", "content": "parent-only-token"},
+    # rows in both sessions, distinguishable single-token content
+    eng.ingest_message({"role": "user", "content": "parentonly"},
                        session_id="PARENT")
-    eng.ingest_message({"role": "user", "content": "child token"})
+    eng.ingest_message({"role": "user", "content": "childonly"})
 
     ids = tools._resolve_scope_session_ids(eng, "auto")
     assert ids == ["CHILD"]  # current session has rows → session scope
 
     # grep with auto should not see the parent-only token
-    out = json.loads(tools.lcm_grep({"query": "parent", "scope": "auto"}, engine=eng))
+    out = json.loads(tools.lcm_grep({"query": "parentonly", "scope": "auto"}, engine=eng))
     assert out["total_results"] == 0
     eng.close()
 
@@ -260,4 +260,74 @@ def test_recent_n_alias(vault_path):
 
     out = json.loads(tools.lcm_recent({"n": 3, "scope": "session"}, engine=eng))
     assert out["total_results"] == 3
+    eng.close()
+
+
+# --------------------------------------------------------------------------
+# regression tests
+# --------------------------------------------------------------------------
+
+def test_tool_calls_no_cross_session_leak(vault_path):
+    """H1: the session filter must apply to the whole OR group, not just the
+    last branch — other sessions' tool rows must not leak under scope='session'."""
+    eng = _engine("CHILD")
+    _open(eng, "PARENT")
+    _open(eng, "CHILD", parent_session_id="PARENT")
+    _ingest_tool_call(eng, "p1", "Read", {"file_path": "/parent.py"}, "parent result",
+                      session_id="PARENT")
+    _ingest_tool_call(eng, "c1", "Bash", {"command": "ls"}, "child result")
+
+    out = json.loads(tools.lcm_tool_calls({"scope": "session"}, engine=eng))
+    sessions = {c["session_id"] for c in out["tool_calls"]}
+    assert sessions == {"CHILD"}
+    assert all(c["tool_name"] != "Read" for c in out["tool_calls"])
+    eng.close()
+
+
+def test_mark_bogus_store_id_not_pinned(vault_path):
+    """L2: a non-existent store_id must return an error and create no mark."""
+    eng = _engine("S1")
+    _open(eng, "S1")
+
+    out = json.loads(tools.lcm_mark({"name": "bogus", "store_id": 99999}, engine=eng))
+    assert "error" in out
+    assert out["store_id"] == 99999
+
+    listed = json.loads(tools.lcm_marks({"scope": "session"}, engine=eng))
+    assert listed["total_results"] == 0
+    eng.close()
+
+
+def test_tool_calls_tool_name_sql_filter(vault_path):
+    """M3: tool_name filtering is pushed into SQL, so a call older than the fetch
+    window is still found instead of being truncated away.
+
+    The lone Task pair is ingested first (oldest), then 205 Read pairs push it far
+    past the newest-window floor (200 rows). With SQL-level `AND tool_name = ?` only
+    the Task rows are fetched, so it is found; without it the newest-window fetch
+    would be all Read rows and the Task call would be truncated → 0 results."""
+    eng = _engine("S1")
+    _open(eng, "S1")
+    _ingest_tool_call(eng, "t0", "Task", {"prompt": "do it"}, "T0")
+    for i in range(205):
+        _ingest_tool_call(eng, f"r{i}", "Read", {"file_path": f"/r{i}.py"}, f"R{i}")
+
+    out = json.loads(tools.lcm_tool_calls(
+        {"tool_name": "Task", "limit": 2, "scope": "session"}, engine=eng))
+    assert out["total_results"] == 1
+    assert all(c["tool_name"] == "Task" for c in out["tool_calls"])
+    eng.close()
+
+
+def test_tool_calls_returns_newest_window(vault_path):
+    """tool_call_rows fetches the NEWEST window: with more rows than the fetch
+    floor, lcm_tool_calls must surface the most recent call, not an old one."""
+    eng = _engine("S1")
+    _open(eng, "S1")
+    for i in range(205):
+        _ingest_tool_call(eng, f"c{i}", "Read", {"file_path": f"/f{i}"}, f"r{i}")
+
+    out = json.loads(tools.lcm_tool_calls({"limit": 1, "scope": "session"}, engine=eng))
+    assert out["total_results"] == 1
+    assert out["tool_calls"][0]["args"] == {"file_path": "/f204"}
     eng.close()

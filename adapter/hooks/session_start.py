@@ -49,7 +49,7 @@ def handle(payload: Dict[str, Any]) -> None:
         f"newest-first), lcm_tool_calls (structured tool-call audit), lcm_whoami "
         f"(this session's id + lineage), lcm_mark / lcm_marks (set/list named "
         f"markers), lcm_describe, lcm_expand, lcm_status, lcm_doctor. "
-        f"scope ∈ {{session, workspace, lineage, auto}}: recall tools default to "
+        f"scope: session|workspace|lineage|auto: recall tools default to "
         f"'lineage' (includes sessions chained by /clear); use scope='session' for "
         f"point-in-time audits. Full parameter schemas are in each tool's MCP "
         f"definition. "

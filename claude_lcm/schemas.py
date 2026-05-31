@@ -183,7 +183,10 @@ LCM_RECENT = {
             },
             "n": {
                 "type": "integer",
-                "description": "Alias for `limit` (number of messages to return).",
+                "description": (
+                    "Alias for `limit` (number of messages to return). When both "
+                    "`limit` and `n` are supplied, `limit` takes precedence."
+                ),
             },
             "scope": _SCOPE_PARAM,
             "session_id": _SESSION_ID_PARAM,
@@ -200,7 +203,10 @@ LCM_TOOL_CALLS = {
         "tools ran, with parsed arguments and (truncated) results. Defaults to "
         "scope='session' for point-in-time audits. group_by='call' returns a "
         "flat list newest-first; group_by='turn' groups calls under the "
-        "assistant turn that issued them."
+        "assistant turn that issued them. Pairing uses tool_call_id when present, "
+        "else falls back to same-tool-name call order; since Claude Code hook "
+        "payloads often omit tool_call_id, `result` is best-effort and may "
+        "mispair interleaved same-name calls whose results arrive out of order."
     ),
     "parameters": {
         "type": "object",
