@@ -22,13 +22,15 @@ _SESSION_ID_PARAM = {
 
 _SCOPE_PARAM = {
     "type": "string",
-    "enum": ["lineage", "workspace", "session"],
+    "enum": ["lineage", "workspace", "session", "auto"],
     "description": (
-        "Search scope. 'lineage' (default) walks parent_session_id from "
-        "the current session transitively — includes prior sessions "
-        "chained by /clear. 'workspace' widens to every session in the "
-        "same project_key (sanitized cwd). 'session' limits to the "
-        "current session_id only."
+        "Search scope. 'lineage' (default for recall tools) walks "
+        "parent_session_id from the current session transitively — includes "
+        "prior sessions chained by /clear. 'workspace' widens to every session "
+        "in the same project_key (sanitized cwd). 'session' limits to the "
+        "current session_id only — use this for point-in-time audits. 'auto' "
+        "resolves deterministically to 'session' when the current session has "
+        "rows of its own, otherwise widens to 'lineage'."
     ),
     "default": "lineage",
 }
@@ -54,6 +56,20 @@ LCM_GREP = {
                 "type": "integer",
                 "description": "Max results to return (default 10)",
                 "default": 10,
+            },
+            "match_mode": {
+                "type": "string",
+                "enum": ["fts5", "literal"],
+                "description": (
+                    "'fts5' (default) interprets the query as FTS5 syntax "
+                    "(keywords, \"phrases\", OR, NOT). 'literal' escapes the "
+                    "whole query as one quoted phrase so punctuation like ':' "
+                    "'[' '-' is matched literally instead of as operators. "
+                    "On an FTS5 parse error the server auto-retries in 'literal' "
+                    "mode and reports an explicit error if that also fails — it "
+                    "never returns an empty result as a false 'no matches'."
+                ),
+                "default": "fts5",
             },
             "session_id": _SESSION_ID_PARAM,
             "scope": _SCOPE_PARAM,
@@ -162,11 +178,128 @@ LCM_RECENT = {
         "properties": {
             "limit": {
                 "type": "integer",
-                "description": "Number of messages to return (default 10)",
+                "description": "Number of messages to return (default 10). `n` is accepted as an alias.",
                 "default": 10,
+            },
+            "n": {
+                "type": "integer",
+                "description": "Alias for `limit` (number of messages to return).",
             },
             "scope": _SCOPE_PARAM,
             "session_id": _SESSION_ID_PARAM,
+        },
+        "required": [],
+    },
+}
+
+LCM_TOOL_CALLS = {
+    "name": "lcm_tool_calls",
+    "description": (
+        "Structured view of tool calls — each tool_use paired with its "
+        "tool_result — instead of grepping raw JSON. Use this to audit what "
+        "tools ran, with parsed arguments and (truncated) results. Defaults to "
+        "scope='session' for point-in-time audits. group_by='call' returns a "
+        "flat list newest-first; group_by='turn' groups calls under the "
+        "assistant turn that issued them."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "tool_name": {
+                "type": "string",
+                "description": "Filter to a single tool name (e.g. 'Read', 'Task').",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max calls (or turns) to return, newest-first (default 20).",
+                "default": 20,
+            },
+            "group_by": {
+                "type": "string",
+                "enum": ["call", "turn"],
+                "description": "Granularity: individual calls or assistant turns.",
+                "default": "call",
+            },
+            "result_chars": {
+                "type": "integer",
+                "description": "Truncate each tool result to this many chars (default 2000).",
+                "default": 2000,
+            },
+            "session_id": _SESSION_ID_PARAM,
+            "scope": _SCOPE_PARAM,
+        },
+        "required": [],
+    },
+}
+
+LCM_WHOAMI = {
+    "name": "lcm_whoami",
+    "description": (
+        "Return the calling session's identity and lineage: session_id, "
+        "parent_session_id, the full lineage chain, started_at, and workspace. "
+        "Pass session_id (it is in the SessionStart context block). If omitted, "
+        "the server makes a best-effort guess from CLAUDE_PROJECT_DIR (the most "
+        "recent session in this workspace) and flags it via 'resolved_via'."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "session_id": _SESSION_ID_PARAM,
+        },
+        "required": [],
+    },
+}
+
+LCM_MARK = {
+    "name": "lcm_mark",
+    "description": (
+        "Record a named mark for the current session — a first-class bookmark "
+        "or protocol marker (e.g. name='ml-intern:active'). Pass store_id to "
+        "bookmark a specific message (which also pins it). Use this instead of "
+        "embedding magic marker strings in the transcript for later FTS grep."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Marker name / label (e.g. 'ml-intern:active').",
+            },
+            "store_id": {
+                "type": "integer",
+                "description": "Optional message store_id to bookmark (also pins it).",
+            },
+            "metadata": {
+                "type": "object",
+                "description": "Optional JSON metadata to attach to the mark.",
+            },
+            "session_id": _SESSION_ID_PARAM,
+        },
+        "required": ["name"],
+    },
+}
+
+LCM_MARKS = {
+    "name": "lcm_marks",
+    "description": (
+        "List marks (bookmarks / protocol markers), optionally filtered by "
+        "name. Defaults to scope='lineage'. Use this to check whether a "
+        "protocol marker was ever set, without FTS-grepping transcript strings."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Filter to a single marker name.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max marks to return, newest-first (default 50).",
+                "default": 50,
+            },
+            "session_id": _SESSION_ID_PARAM,
+            "scope": _SCOPE_PARAM,
         },
         "required": [],
     },

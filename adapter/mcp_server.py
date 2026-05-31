@@ -1,8 +1,9 @@
 """MCP server — exposes the claude-lcm vault to MCP clients.
 
-Registers 5 tools: lcm_grep, lcm_describe, lcm_expand, lcm_status,
-lcm_doctor. Handlers are thin wrappers around the lifted handlers in
-`claude_lcm.tools`, which operate against a ClaudeLcmEngine instance.
+Registers the lcm_* tools: lcm_grep, lcm_recent, lcm_tool_calls, lcm_whoami,
+lcm_mark, lcm_marks, lcm_describe, lcm_expand, lcm_status, lcm_doctor. Handlers
+are thin wrappers around the handlers in `claude_lcm.tools`, which operate
+against a ClaudeLcmEngine instance.
 
 The engine's `_session_id` is set per-client-request via a required
 `session_id` tool argument (or read from the LCM_SESSION_ID env var if
@@ -29,16 +30,24 @@ from claude_lcm.schemas import (
     LCM_DOCTOR,
     LCM_EXPAND,
     LCM_GREP,
+    LCM_MARK,
+    LCM_MARKS,
     LCM_RECENT,
     LCM_STATUS,
+    LCM_TOOL_CALLS,
+    LCM_WHOAMI,
 )
 from claude_lcm.tools import (
     lcm_describe,
     lcm_doctor,
     lcm_expand,
     lcm_grep,
+    lcm_mark,
+    lcm_marks,
     lcm_recent,
     lcm_status,
+    lcm_tool_calls,
+    lcm_whoami,
 )
 
 logger = logging.getLogger("claude_lcm.mcp")
@@ -50,9 +59,24 @@ HANDLERS = {
     "lcm_status": lcm_status,
     "lcm_doctor": lcm_doctor,
     "lcm_recent": lcm_recent,
+    "lcm_tool_calls": lcm_tool_calls,
+    "lcm_whoami": lcm_whoami,
+    "lcm_mark": lcm_mark,
+    "lcm_marks": lcm_marks,
 }
 
-SCHEMAS = [LCM_GREP, LCM_RECENT, LCM_DESCRIBE, LCM_EXPAND, LCM_STATUS, LCM_DOCTOR]
+SCHEMAS = [
+    LCM_GREP,
+    LCM_RECENT,
+    LCM_TOOL_CALLS,
+    LCM_WHOAMI,
+    LCM_MARK,
+    LCM_MARKS,
+    LCM_DESCRIBE,
+    LCM_EXPAND,
+    LCM_STATUS,
+    LCM_DOCTOR,
+]
 
 
 def _tool_def(schema: dict) -> types.Tool:

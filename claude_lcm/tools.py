@@ -21,6 +21,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_VALID_SCOPES = ("lineage", "workspace", "session", "auto")
+
+
+def _fts5_quote(query: str) -> str:
+    """Escape a query as a single FTS5 string literal (a quoted phrase).
+
+    Wraps the whole query in double quotes, doubling any embedded ones, so
+    punctuation like ':' '[' '-' is treated as literal tokens instead of FTS5
+    operators. Tokenization still applies, but no operator parsing happens —
+    which is what callers asking for a 'literal' match want.
+    """
+    return '"' + query.replace('"', '""') + '"'
+
 
 def _resolve_scope_session_ids(engine: "ClaudeLcmEngine",
                                 scope: str) -> list[str] | None:
@@ -35,6 +48,12 @@ def _resolve_scope_session_ids(engine: "ClaudeLcmEngine",
         return []
     if scope == "session":
         return [current]
+    if scope == "auto":
+        # Deterministic: stay in the current session when it has rows of its
+        # own (point-in-time audit), otherwise widen to the full lineage.
+        if engine._store.session_has_rows(current):
+            return [current]
+        return engine._store.walk_lineage(current)
     if scope == "workspace":
         pk = engine._store.project_key_for_session(current)
         if pk is None:
@@ -115,27 +134,46 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
 
     limit = args.get("limit", 10)
     scope = args.get("scope", "lineage")
-    if scope not in ("lineage", "workspace", "session"):
+    if scope not in _VALID_SCOPES:
         scope = "lineage"
+    match_mode = args.get("match_mode", "fts5")
+    if match_mode not in ("fts5", "literal"):
+        match_mode = "fts5"
 
     session_id = engine._session_id
     session_ids = _resolve_scope_session_ids(engine, scope)
     results = []
 
+    effective_query = _fts5_quote(query) if match_mode == "literal" else query
     try:
-        msg_hits = engine._store.search(query, session_ids=session_ids, limit=limit)
-        for hit in msg_hits:
-            results.append(
-                {
-                    "type": "message",
-                    "depth": "raw",
-                    "store_id": hit["store_id"],
-                    "role": hit["role"],
-                    "snippet": hit.get("snippet", hit.get("content", "")[:200]),
-                }
-            )
+        msg_hits = engine._store.search(effective_query, session_ids=session_ids, limit=limit)
     except Exception as exc:
-        logger.debug("Message search failed: %s", exc)
+        # An FTS5 parse error must never masquerade as an empty result (a false
+        # negative that reads as "no matches"). Retry once as a quoted literal;
+        # if that also fails, surface the error explicitly.
+        logger.debug("FTS5 search failed (%s); retrying as literal", exc)
+        try:
+            msg_hits = engine._store.search(
+                _fts5_quote(query), session_ids=session_ids, limit=limit
+            )
+            match_mode = "literal"
+        except Exception as exc2:
+            return json.dumps({
+                "error": "fts5_parse_error",
+                "detail": str(exc2),
+                "query": query,
+                "hint": "Retry with match_mode='literal', or simplify the FTS5 query.",
+            })
+    for hit in msg_hits:
+        results.append(
+            {
+                "type": "message",
+                "depth": "raw",
+                "store_id": hit["store_id"],
+                "role": hit["role"],
+                "snippet": hit.get("snippet", hit.get("content", "")[:200]),
+            }
+        )
 
     try:
         node_hits = engine._dag.search(query, session_id=session_id, limit=limit)
@@ -154,7 +192,13 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         logger.debug("Node search failed: %s", exc)
 
     results.sort(key=lambda result: (0 if result["type"] == "message" else 1, result.get("depth", "")))
-    return json.dumps({"query": query, "scope": scope, "total_results": len(results), "results": results[:limit]})
+    return json.dumps({
+        "query": query,
+        "scope": scope,
+        "match_mode": match_mode,
+        "total_results": len(results),
+        "results": results[:limit],
+    })
 
 
 def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
@@ -163,9 +207,9 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     if engine is None:
         return json.dumps({"error": "claude-lcm engine not initialized"})
 
-    limit = args.get("limit", 10)
+    limit = args.get("limit", args.get("n", 10))  # accept `n` as an alias
     scope = args.get("scope", "lineage")
-    if scope not in ("lineage", "workspace", "session"):
+    if scope not in _VALID_SCOPES:
         scope = "lineage"
 
     session_ids = _resolve_scope_session_ids(engine, scope)
@@ -436,4 +480,246 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     return json.dumps({
         "overall": overall,
         "checks": checks,
+    })
+
+
+# ----------------------------------------------------------------------------
+# Structured tool-call access, identity, and markers (claude-lcm extensions)
+# ----------------------------------------------------------------------------
+
+_RESULT_ROLES = ("tool", "tool_result")
+
+
+def _normalize_tool_call(call: Any) -> Dict[str, Any]:
+    """Best-effort normalization of a stored tool_call into {name, args, id}.
+
+    Handles the adapter's native shape ({id, name, arguments}) plus OpenAI-style
+    ({function:{name, arguments}}) and Anthropic-style ({input}) defensively.
+    """
+    if not isinstance(call, dict):
+        return {"name": None, "args": None, "id": None}
+    fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+    name = call.get("name") or fn.get("name")
+    args = call.get("arguments")
+    if args is None:
+        args = fn.get("arguments")
+    if args is None:
+        args = call.get("input")
+    if args is None:
+        args = call.get("args")
+    return {"name": name, "args": args, "id": call.get("id") or call.get("tool_call_id")}
+
+
+def _truncate(text: Any, limit: int) -> Any:
+    if not isinstance(text, str):
+        return text
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def lcm_tool_calls(args: Dict[str, Any], **kwargs) -> str:
+    """Structured view of tool calls — each tool_use paired with its tool_result.
+
+    Defaults to scope='session' (point-in-time audits). group_by='call' returns a
+    flat list of calls newest-first; group_by='turn' groups calls under the
+    assistant turn that issued them.
+    """
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "claude-lcm engine not initialized"})
+
+    scope = args.get("scope", "session")
+    if scope not in _VALID_SCOPES:
+        scope = "session"
+    limit = args.get("limit", 20)
+    tool_name = args.get("tool_name")
+    group_by = args.get("group_by", "call")
+    if group_by not in ("call", "turn"):
+        group_by = "call"
+    result_chars = args.get("result_chars", 2000)
+
+    session_ids = _resolve_scope_session_ids(engine, scope)
+    if not session_ids:
+        return json.dumps({
+            "error": "No active session",
+            "hint": "pass session_id (from the SessionStart context)",
+        })
+
+    rows = engine._store.tool_call_rows(session_ids, limit=max(limit * 8, 200))
+
+    turns: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []  # call records awaiting a result
+    for row in rows:
+        tcs = row.get("tool_calls")
+        if tcs:
+            turn = {
+                "message_id": row.get("store_id"),
+                "text": row.get("content"),
+                "timestamp": row.get("timestamp"),
+                "session_id": row.get("session_id"),
+                "tool_calls": [],
+            }
+            for raw in tcs:
+                norm = _normalize_tool_call(raw)
+                rec = {
+                    "store_id": row.get("store_id"),
+                    "tool_name": norm["name"] or row.get("tool_name"),
+                    "args": norm["args"],
+                    "tool_call_id": norm["id"],
+                    "result": None,
+                    "result_store_id": None,
+                    "timestamp": row.get("timestamp"),
+                    "session_id": row.get("session_id"),
+                }
+                turn["tool_calls"].append(rec)
+                pending.append(rec)
+            turns.append(turn)
+        else:
+            # tool_result row — pair to a pending call (exact id first, then by
+            # name adjacency, since CC hook payloads frequently omit tool_call_id).
+            rid = row.get("tool_call_id")
+            rname = row.get("tool_name")
+            match = None
+            if rid:
+                for rec in pending:
+                    if rec["result"] is None and rec["tool_call_id"] and rec["tool_call_id"] == rid:
+                        match = rec
+                        break
+            if match is None:
+                for rec in pending:
+                    if rec["result"] is None and (rname is None or rec["tool_name"] == rname):
+                        match = rec
+                        break
+            if match is not None:
+                match["result"] = _truncate(row.get("content"), result_chars)
+                match["result_store_id"] = row.get("store_id")
+                pending.remove(match)
+
+    if group_by == "turn":
+        out_turns = []
+        for turn in turns:
+            calls = turn["tool_calls"]
+            if tool_name:
+                calls = [c for c in calls if c["tool_name"] == tool_name]
+            if not calls:
+                continue
+            out_turns.append({**turn, "tool_calls": calls})
+        out_turns.sort(key=lambda t: (t["message_id"] or 0), reverse=True)
+        out_turns = out_turns[:limit]
+        return json.dumps({
+            "scope": scope,
+            "group_by": "turn",
+            "total_results": len(out_turns),
+            "turns": out_turns,
+        })
+
+    calls = [c for turn in turns for c in turn["tool_calls"]]
+    if tool_name:
+        calls = [c for c in calls if c["tool_name"] == tool_name]
+    calls.sort(key=lambda c: (c["store_id"] or 0), reverse=True)
+    calls = calls[:limit]
+    return json.dumps({
+        "scope": scope,
+        "group_by": "call",
+        "total_results": len(calls),
+        "tool_calls": calls,
+    })
+
+
+def lcm_whoami(args: Dict[str, Any], **kwargs) -> str:
+    """Return the calling session's identity + lineage.
+
+    With session_id (the canonical path) returns exact identity. Without it,
+    best-effort: resolve via CLAUDE_PROJECT_DIR to the most recent session in
+    this workspace — flagged so callers know it may be wrong under concurrency.
+    """
+    import os
+
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "claude-lcm engine not initialized"})
+
+    session_id = engine._session_id
+    resolved_via = "session_id"
+    warning = None
+    if not session_id:
+        proj = os.environ.get("CLAUDE_PROJECT_DIR")
+        if proj:
+            from claude_lcm.workspace import sanitize_path
+            pk = sanitize_path(proj)
+            session_id = engine._store.latest_session_for_project(pk)
+            resolved_via = "project_dir_latest"
+            warning = (
+                "session_id not provided; resolved to the most recently started "
+                "session for CLAUDE_PROJECT_DIR. May be wrong with concurrent sessions."
+            )
+    if not session_id:
+        return json.dumps({
+            "error": "could not determine session_id",
+            "hint": "pass session_id explicitly (it is in the SessionStart context block)",
+        })
+
+    meta = engine._store.get_session(session_id) or {}
+    lineage = engine._store.walk_lineage(session_id)
+    parent = lineage[1] if len(lineage) > 1 else None
+    out = {
+        "session_id": session_id,
+        "parent_session_id": parent,
+        "lineage": lineage,
+        "started_at": meta.get("started_at"),
+        "workspace_path": meta.get("workspace_path"),
+        "agent_kind": meta.get("agent_kind"),
+        "message_count": engine._store.get_session_count(session_id),
+        "resolved_via": resolved_via,
+    }
+    if warning:
+        out["warning"] = warning
+    return json.dumps(out)
+
+
+def lcm_mark(args: Dict[str, Any], **kwargs) -> str:
+    """Record a named mark (bookmark / protocol marker) for the current session."""
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "claude-lcm engine not initialized"})
+
+    session_id = engine._session_id
+    if not session_id:
+        return json.dumps({"error": "No active session", "hint": "pass session_id"})
+    name = (args.get("name") or "").strip()
+    if not name:
+        return json.dumps({"error": "name is required"})
+    store_id = args.get("store_id")
+    metadata = args.get("metadata")
+    try:
+        mark_id = engine._store.add_mark(
+            session_id, name, store_id=store_id, metadata=metadata
+        )
+    except Exception as exc:
+        return json.dumps({"error": f"add_mark failed: {exc}"})
+    return json.dumps({
+        "mark_id": mark_id,
+        "session_id": session_id,
+        "name": name,
+        "store_id": store_id,
+        "pinned": store_id is not None,
+    })
+
+
+def lcm_marks(args: Dict[str, Any], **kwargs) -> str:
+    """List marks for the current session (or scope), optionally filtered by name."""
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "claude-lcm engine not initialized"})
+
+    scope = args.get("scope", "lineage")
+    if scope not in _VALID_SCOPES:
+        scope = "lineage"
+    name = args.get("name")
+    limit = args.get("limit", 50)
+    session_ids = _resolve_scope_session_ids(engine, scope)
+    marks = engine._store.get_marks(session_ids, name=name, limit=limit)
+    return json.dumps({
+        "scope": scope,
+        "total_results": len(marks),
+        "marks": marks,
     })

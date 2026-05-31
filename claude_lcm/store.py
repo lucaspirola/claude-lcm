@@ -151,6 +151,23 @@ class MessageStore:
                 ts                REAL NOT NULL
             )"""
         )
+        # --- marks: first-class bookmarks / protocol markers (additive) ---
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS marks (
+                mark_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id    TEXT NOT NULL,
+                store_id      INTEGER,
+                name          TEXT NOT NULL,
+                metadata      TEXT,
+                created_at    REAL NOT NULL
+            )"""
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_marks_session ON marks(session_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_marks_name ON marks(name)"
+        )
         # --- exploration_summary migration (additive, idempotent) ---
         fs_cols = {
             r[1] for r in self._conn.execute(
@@ -683,6 +700,82 @@ class MessageStore:
         if stored.get("tool_name"):
             msg["name"] = stored["tool_name"]
         return msg
+
+    # -- Marks (claude-lcm extension) -------------------------------------
+
+    def add_mark(self, session_id: str, name: str,
+                 store_id: int | None = None,
+                 metadata: Dict[str, Any] | None = None) -> int:
+        """Record a named mark; pin the referenced message when store_id is given."""
+        meta_json = json.dumps(metadata) if metadata else None
+        cur = self._conn.execute(
+            """INSERT INTO marks (session_id, store_id, name, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (session_id, store_id, name, meta_json, time.time()),
+        )
+        if store_id is not None:
+            self._conn.execute(
+                "UPDATE messages SET pinned = 1 WHERE store_id = ?", (store_id,)
+            )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_marks(self, session_ids: List[str] | None = None,
+                  name: str | None = None,
+                  limit: int = 50) -> List[Dict[str, Any]]:
+        sql = "SELECT mark_id, session_id, store_id, name, metadata, created_at FROM marks"
+        clauses: List[str] = []
+        params: List[Any] = []
+        if session_ids:
+            placeholders = ",".join("?" * len(session_ids))
+            clauses.append(f"session_id IN ({placeholders})")
+            params.extend(session_ids)
+        if name:
+            clauses.append("name = ?")
+            params.append(name)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY mark_id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        cols = ["mark_id", "session_id", "store_id", "name", "metadata", "created_at"]
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            if d.get("metadata"):
+                try:
+                    d["metadata"] = json.loads(d["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            out.append(d)
+        return out
+
+    # -- Structured tool-call access (claude-lcm extension) ---------------
+
+    def tool_call_rows(self, session_ids: List[str] | None = None,
+                       limit: int = 200) -> List[Dict[str, Any]]:
+        """Return tool-related message rows (tool_use + tool_result), oldest-first,
+        so callers can reconstruct call/result pairs and assistant turns."""
+        sql = (
+            "SELECT * FROM messages "
+            "WHERE tool_calls IS NOT NULL OR tool_name IS NOT NULL "
+            "OR tool_call_id IS NOT NULL"
+        )
+        params: List[Any] = []
+        if session_ids:
+            placeholders = ",".join("?" * len(session_ids))
+            sql += f" AND session_id IN ({placeholders})"
+            params.extend(session_ids)
+        sql += " ORDER BY store_id ASC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def session_has_rows(self, session_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1", (session_id,)
+        ).fetchone()
+        return row is not None
 
     # -- Lifecycle ----------------------------------------------------------
 
