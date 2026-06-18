@@ -41,21 +41,39 @@ HOOK_TAG = "# claude-lcm"  # sentinel substring used for idempotency
 def _python_exe() -> str:
     """Pick the python interpreter to invoke hooks with.
 
-    Prefer the project venv if present; otherwise whatever is running us.
+    Prefer the project venv if present (POSIX `bin/` or Windows `Scripts/`
+    layout); otherwise whatever is running us.
     """
-    venv_py = REPO_ROOT / ".venv" / "bin" / "python"
-    if venv_py.exists():
-        return str(venv_py)
+    for rel in ("bin/python", "Scripts/python.exe"):
+        venv_py = REPO_ROOT / ".venv" / rel
+        if venv_py.exists():
+            return str(venv_py)
     return sys.executable
 
 
-def _hook_command(module: str) -> str:
+def _hook_invocation(module: str) -> tuple[str, list[str]]:
+    """Return (command, args) for a hook, as a shell-independent exec form.
+
+    Claude Code runs a hook with an `args` array by spawning the executable
+    directly — no shell — so this works identically under bash, PowerShell,
+    and cmd with no quoting concerns. A `sys.path` bootstrap prepends the
+    repo root (replacing the old `env PYTHONPATH=...` shell idiom) so hooks
+    import the package without relying on a pip install. The `HOOK_TAG`
+    sentinel lives inside the bootstrap as a Python comment, preserving
+    idempotent detection.
+    """
     py = _python_exe()
-    # PYTHONPATH prepend so hook processes can import the repo without install
-    return (
-        f'env PYTHONPATH="{REPO_ROOT}:$PYTHONPATH" "{py}" -m {module} '
-        f'{HOOK_TAG}'
+    bootstrap = (
+        f"import sys; sys.path.insert(0, {repr(str(REPO_ROOT))}); "
+        f"from runpy import run_module; "
+        f"run_module({module!r}, run_name='__main__', alter_sys=True)  {HOOK_TAG}"
     )
+    return py, ["-c", bootstrap]
+
+
+def _hook_blob(h: Dict[str, Any]) -> str:
+    """Flatten a hook dict's command + args for sentinel matching."""
+    return h.get("command", "") + " " + " ".join(h.get("args") or [])
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -82,16 +100,18 @@ def _ensure_hook_entry(settings: Dict[str, Any], event: str, module: str) -> boo
     hooks = settings.setdefault("hooks", {})
     event_entries: List[Dict[str, Any]] = hooks.setdefault(event, [])
 
-    new_cmd = _hook_command(module)
+    new_cmd, new_args = _hook_invocation(module)
 
     for entry in event_entries:
         for h in entry.get("hooks", []):
-            cmd = h.get("command", "")
-            if HOOK_TAG in cmd and module in cmd:
-                # already installed — refresh the command in case the
-                # interpreter path changed
-                if cmd != new_cmd:
+            blob = _hook_blob(h)
+            if HOOK_TAG in blob and module in blob:
+                # already installed — refresh the command/args in case the
+                # interpreter path changed or the entry uses the old
+                # shell-string form (migrate it to the exec args form)
+                if h.get("command") != new_cmd or h.get("args") != new_args:
                     h["command"] = new_cmd
+                    h["args"] = new_args
                     return True
                 return False
 
@@ -101,6 +121,7 @@ def _ensure_hook_entry(settings: Dict[str, Any], event: str, module: str) -> boo
             {
                 "type": "command",
                 "command": new_cmd,
+                "args": new_args,
                 "timeout": 10,
             }
         ],
@@ -117,7 +138,7 @@ def _remove_hook_entries(settings: Dict[str, Any]) -> int:
         kept: List[Dict[str, Any]] = []
         for entry in entries:
             sub = entry.get("hooks", [])
-            sub_kept = [h for h in sub if HOOK_TAG not in h.get("command", "")]
+            sub_kept = [h for h in sub if HOOK_TAG not in _hook_blob(h)]
             if sub_kept:
                 entry["hooks"] = sub_kept
                 kept.append(entry)
