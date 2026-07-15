@@ -9,6 +9,7 @@ import pytest
 
 from claude_lcm.config import ClaudeLcmConfig
 from claude_lcm.engine import ClaudeLcmEngine
+from claude_lcm.schemas import LCM_TOOL_CALLS
 from claude_lcm.tools import (
     lcm_describe,
     lcm_doctor,
@@ -16,6 +17,7 @@ from claude_lcm.tools import (
     lcm_grep,
     lcm_recent,
     lcm_status,
+    lcm_tool_calls,
 )
 
 
@@ -63,6 +65,47 @@ def test_status_reports_session(engine):
     assert out["agent_kind"] == "claude-code"
     assert out["store"]["messages"] == 2
     assert out["version"] == "v1 (no compaction)"
+
+
+def test_status_reports_vault_stats(tmp_path):
+    """lcm_status delivers what its description promises: vault-wide session
+    count and on-disk size, not just current-session stats."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", agent_kind="claude-code", workspace_path=str(tmp_path))
+    eng.ingest_message({"role": "user", "content": "hi"})
+    eng.open_session("s2", agent_kind="claude-code", workspace_path=str(tmp_path))
+    eng.ingest_message({"role": "user", "content": "there"})
+
+    out = json.loads(lcm_status({}, engine=eng))
+    assert out["vault"]["total_sessions"] == 2
+    assert out["vault"]["total_messages"] >= 2
+    assert out["vault"]["size_bytes"] > 0
+    assert out["vault"]["path"] == str(eng._store.db_path)
+    eng.close()
+
+
+def test_tool_calls_scope_default_matches_schema(engine):
+    """Regression: the schema's advertised scope default must equal the
+    handler's actual default. lcm_tool_calls defaults to 'session' (audit),
+    unlike the recall tools; the schema used to advertise 'lineage'."""
+    assert LCM_TOOL_CALLS["parameters"]["properties"]["scope"]["default"] == "session"
+    out = json.loads(lcm_tool_calls({}, engine=engine))
+    assert out["scope"] == "session"
+
+
+def test_describe_int_id_is_vault_global(tmp_path):
+    """Regression/doc: an integer snapshot_id is a vault-global primary key —
+    it resolves regardless of the session_id passed (unlike path lookups)."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    sid = eng.ingest_file_snapshot(file_path="/tmp/foo.py", op="read", content=b"x=1")
+
+    out = json.loads(lcm_describe({"id": sid, "session_id": "a-different-session"}, engine=eng))
+    assert "error" not in out
+    assert out["snapshot_id"] == sid
+    eng.close()
 
 
 def test_doctor_healthy(engine):

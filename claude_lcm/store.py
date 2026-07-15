@@ -726,6 +726,16 @@ class MessageStore:
         ).fetchone()
         return row[0] if row else 0
 
+    def get_vault_stats(self) -> Dict[str, int]:
+        """Return vault-wide totals (every session), for lcm_status's health
+        overview — distinct from the per-session counts above."""
+        sessions = self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+        messages = self._conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+        return {
+            "total_sessions": sessions[0] if sessions else 0,
+            "total_messages": messages[0] if messages else 0,
+        }
+
     # -- Search -------------------------------------------------------------
 
     def search(self, query: str, session_id: str | None = None,

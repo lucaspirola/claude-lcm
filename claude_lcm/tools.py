@@ -356,6 +356,18 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     return json.dumps({"error": f"Unknown source_type: {node.source_type}"})
 
 
+def _vault_size_bytes(db_path: Any) -> int:
+    """On-disk footprint of the vault: the SQLite file plus its WAL/SHM
+    sidecars (WAL mode keeps a `-wal` that can dwarf the main file)."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(f"{db_path}{suffix}")
+        except OSError:
+            pass
+    return total
+
+
 def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     """Quick health overview of the vault for the current session."""
     engine = _require_engine(kwargs)
@@ -380,6 +392,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         d["source_tokens"] += node.source_token_count
 
     session_meta = engine._store.get_session(session_id) or {}
+    vault_stats = engine._store.get_vault_stats()
 
     transcript_path, transcript_offset = engine._store.get_transcript_offset(session_id)
     transcript_sync: Dict[str, Any] = {
@@ -411,7 +424,13 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
                 f"d{depth}": info for depth, info in sorted(depths.items())
             },
         },
-        "vault_path": str(engine._store.db_path),
+        "vault": {
+            "path": str(engine._store.db_path),
+            "size_bytes": _vault_size_bytes(engine._store.db_path),
+            "total_sessions": vault_stats["total_sessions"],
+            "total_messages": vault_stats["total_messages"],
+        },
+        "vault_path": str(engine._store.db_path),  # kept for back-compat
         "version": "v1 (no compaction)",
     })
 

@@ -35,6 +35,12 @@ _SCOPE_PARAM = {
     "default": "lineage",
 }
 
+# Same enum and semantics as _SCOPE_PARAM, but defaulting to 'session' — used by
+# the point-in-time audit tools (lcm_tool_calls) where the recall-oriented
+# 'lineage' default would be wrong. Keeping the declared default in sync with the
+# handler's actual default is the contract MCP clients rely on.
+_SCOPE_PARAM_SESSION_DEFAULT = {**_SCOPE_PARAM, "default": "session"}
+
 _INCLUDE_THINKING_PARAM = {
     "type": "boolean",
     "description": (
@@ -104,10 +110,16 @@ LCM_GREP = {
 LCM_DESCRIBE = {
     "name": "lcm_describe",
     "description": (
-        "Return metadata for a file snapshot or summary node. "
-        "Pass a snapshot_id (int) or a file path (string) as `id`. "
-        "For paths, pass session_id to scope to a lineage; omit for vault-global latest. "
-        "Omit `id` entirely to get a session overview (message count, DAG status). "
+        "Return metadata for a file snapshot or summary node.\n"
+        "• `id` = file path (string): returns the latest snapshot for that path. "
+        "Pass session_id to scope the lookup to your session lineage; omit "
+        "session_id for the vault-global latest.\n"
+        "• `id` = snapshot_id (int): an exact by-id lookup. Integer ids are "
+        "vault-global primary keys — they IGNORE session_id/scope and may return "
+        "a snapshot from any session or workspace in the vault. (This is "
+        "intentional: the vault is shared across sessions.)\n"
+        "• omit `id` entirely: returns a session overview (message count, DAG "
+        "status) for the current session.\n"
         "In v1 the DAG is empty; integer IDs resolve to file snapshots only."
     ),
     "parameters": {
@@ -115,13 +127,19 @@ LCM_DESCRIBE = {
         "properties": {
             "id": {
                 "type": ["string", "integer"],
-                "description": "snapshot_id (int) or file path (string). Omit for session overview.",
+                "description": (
+                    "snapshot_id (int, vault-global) or file path (string, "
+                    "scoped by session_id). Omit for session overview."
+                ),
             },
+            # session_id scopes PATH lookups to a lineage; it has no effect on
+            # integer-id lookups (vault-global) or the session overview.
             "session_id": _SESSION_ID_PARAM,
-            "scope": _SCOPE_PARAM,
         },
         # `id` is intentionally optional: omitting it triggers the session
         # overview (backward compat). When present it performs a snapshot lookup.
+        # No `scope` param: the handler never consulted it — path lookups always
+        # use the caller's lineage, so advertising `scope` here was misleading.
         "required": [],
     },
 }
@@ -156,9 +174,14 @@ LCM_EXPAND = {
 LCM_STATUS = {
     "name": "lcm_status",
     "description": (
-        "Get a quick health overview of the claude-lcm vault for the "
-        "current session. Shows total session count, message count, vault "
-        "size on disk, and active configuration."
+        "Health overview of the claude-lcm vault. Returns current-session "
+        "stats (message count, per-role counts, estimated tokens, subagent "
+        "transcripts ingested, and the transcript-sync cursor) under `store`/"
+        "`transcript_sync`, plus a vault-wide `vault` block (total session "
+        "count, total message count, and on-disk size in bytes including the "
+        "WAL) and the schema `version`. Session-scoped counts describe the "
+        "current session only; the `vault` block is global. For deeper "
+        "integrity checks (FTS sync, orphans, sync freshness) use lcm_doctor."
     ),
     "parameters": {
         "type": "object",
@@ -257,7 +280,7 @@ LCM_TOOL_CALLS = {
                 "default": 2000,
             },
             "session_id": _SESSION_ID_PARAM,
-            "scope": _SCOPE_PARAM,
+            "scope": _SCOPE_PARAM_SESSION_DEFAULT,
         },
         "required": [],
     },
