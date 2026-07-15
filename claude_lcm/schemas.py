@@ -75,6 +75,30 @@ _INCLUDE_TOOL_CALLS_PARAM = {
     "default": False,
 }
 
+_CONTENT_CHARS_PARAM = {
+    "type": "integer",
+    "description": (
+        "Cap each returned message's content to this many characters (an "
+        "ellipsis marks truncation). Omit for full, untruncated content — the "
+        "default — so recall shows complete replies for a post-mortem. Set e.g. "
+        "500 for a leaner window."
+    ),
+}
+
+# grep's tool opt-in differs from recall's: tool-CALL rows have no text to match,
+# so for search this governs whether the tool-RESULT blobs are searched.
+_INCLUDE_TOOL_CALLS_IN_SEARCH_PARAM = {
+    "type": "boolean",
+    "description": (
+        "Search tool-result rows too. By default the search targets the "
+        "conversation and skips role='tool' output blobs — for common terms "
+        "(e.g. 'error', 'test') those blobs can be ~100% of raw matches and bury "
+        "real hits. Set true to include them. For a structured call+result "
+        "audit, prefer lcm_tool_calls."
+    ),
+    "default": False,
+}
+
 LCM_GREP = {
     "name": "lcm_grep",
     "description": (
@@ -83,7 +107,10 @@ LCM_GREP = {
         "this to find specific topics, decisions, file paths, or error "
         "messages from earlier sessions, even ones that have scrolled "
         "out of Claude Code's current context window. FTS5 syntax: "
-        "keywords, \"quoted phrases\", OR, NOT."
+        "keywords, \"quoted phrases\", OR, NOT. Targets the conversation: "
+        "tool-result blobs are skipped by default (set include_tool_calls to "
+        "search them), and internal markers / task-notifications are always "
+        "skipped as noise."
     ),
     "parameters": {
         "type": "object",
@@ -115,6 +142,7 @@ LCM_GREP = {
             "scope": _SCOPE_PARAM,
             "include_thinking": _INCLUDE_THINKING_PARAM,
             "include_subagents": _INCLUDE_SUBAGENTS_PARAM,
+            "include_tool_calls": _INCLUDE_TOOL_CALLS_IN_SEARCH_PARAM,
         },
         "required": ["query"],
     },
@@ -258,6 +286,7 @@ LCM_RECENT = {
             "include_thinking": _INCLUDE_THINKING_PARAM,
             "include_subagents": _INCLUDE_SUBAGENTS_PARAM,
             "include_tool_calls": _INCLUDE_TOOL_CALLS_PARAM,
+            "content_chars": _CONTENT_CHARS_PARAM,
         },
         "required": [],
     },

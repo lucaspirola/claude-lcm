@@ -465,6 +465,57 @@ def test_lcm_recent_excludes_task_notifications(tmp_path):
     eng.close()
 
 
+def test_lcm_recent_returns_full_content_by_default(tmp_path):
+    """The 500-char clip is lifted: recall returns complete message content so
+    a post-mortem sees full replies. Pass content_chars to cap for leanness."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    long_text = "x" * 2000
+    eng.ingest_message({"role": "assistant", "content": long_text})
+
+    out = json.loads(lcm_recent({}, engine=eng))
+    assert out["messages"][0]["content"] == long_text  # full, untruncated
+
+    capped = json.loads(lcm_recent({"content_chars": 100}, engine=eng))
+    c = capped["messages"][0]["content"]
+    assert len(c) == 101 and c.endswith("…")  # 100 chars + ellipsis
+    eng.close()
+
+
+def test_lcm_grep_excludes_tool_results_by_default(tmp_path):
+    """grep for a common term must not drown in tool-result blobs (the fat);
+    include_tool_calls widens the search to tool output."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_message({"role": "user", "content": "please fix the kumquat bug"})
+    eng.ingest_message({"role": "tool", "content": '{"stdout": "kumquat kumquat"}'})
+
+    out = json.loads(lcm_grep({"query": "kumquat"}, engine=eng))
+    assert {r["role"] for r in out["results"]} == {"user"}  # tool result excluded
+
+    widened = json.loads(lcm_grep({"query": "kumquat", "include_tool_calls": True}, engine=eng))
+    assert "tool" in {r["role"] for r in widened["results"]}
+    eng.close()
+
+
+def test_lcm_grep_excludes_notifications_and_markers(tmp_path):
+    """grep skips harness machinery — task-notifications and [stop] markers —
+    so a search returns conversation, not noise."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_message({"role": "assistant", "content": "the migration ended cleanly"})
+    eng.ingest_message({"role": "system", "content": "[stop: assistant turn ended]"})
+    eng.ingest_message({"role": "user", "content": "<task-notification>\nbackground task ended"})
+
+    out = json.loads(lcm_grep({"query": "ended"}, engine=eng))
+    assert len(out["results"]) == 1
+    assert out["results"][0]["role"] == "assistant"
+    eng.close()
+
+
 def test_lcm_recent_scope_lineage_crosses_clear(tmp_path):
     cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
     eng = ClaudeLcmEngine(config=cfg, session_id="B")

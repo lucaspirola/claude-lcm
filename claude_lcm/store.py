@@ -369,7 +369,8 @@ class MessageStore:
                         limit: int = 10,
                         include_thinking: bool = False,
                         include_subagents: bool = False,
-                        include_tool_calls: bool = False) -> List[Dict[str, Any]]:
+                        include_tool_calls: bool = False,
+                        content_chars: int | None = None) -> List[Dict[str, Any]]:
         """Return the most recent `limit` messages across `session_ids`, newest first.
 
         Default recall is the conversation \u2014 user prompts and assistant reply
@@ -427,8 +428,10 @@ class MessageStore:
         result = []
         for row in rows:
             d = dict(zip(cols, row))
-            if d["content"] and len(d["content"]) > 500:
-                d["content"] = d["content"][:500] + "\u2026"
+            # Full content by default (a post-mortem wants complete replies);
+            # callers pass content_chars to cap for a leaner window.
+            if content_chars is not None and d["content"] and len(d["content"]) > content_chars:
+                d["content"] = d["content"][:content_chars] + "\u2026"
             raw_tc = d.pop("tool_calls")
             if include_tool_calls and raw_tc:
                 try:
@@ -779,19 +782,30 @@ class MessageStore:
                session_ids: list[str] | None = None,
                limit: int = 20,
                include_thinking: bool = False,
-               include_subagents: bool = False) -> List[Dict[str, Any]]:
+               include_subagents: bool = False,
+               include_tool_calls: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across messages.
 
         At most one of `session_id` or `session_ids` should be provided.
-        If both are None, searches all sessions in the vault. By default
-        excludes `assistant_thinking` rows and subagent (non-null `agent_id`)
-        rows — pass the `include_*` flags to widen the search.
+        If both are None, searches all sessions in the vault. Search targets
+        the conversation by default: `assistant_thinking` rows
+        (`include_thinking`), subagent rows (`include_subagents`), and
+        `role='tool'` result blobs (`include_tool_calls`) are excluded — the
+        tool blobs otherwise dominate common-term searches (e.g. 'error' can be
+        ~100% tool output). Internal `[stop]` markers and harness-injected
+        `<task-notification>` blocks are always excluded as noise. All remain in
+        the vault and are reachable by widening the flags.
         """
         extra_clauses = []
         if not include_thinking:
             extra_clauses.append("m.role != 'assistant_thinking'")
         if not include_subagents:
             extra_clauses.append("m.agent_id IS NULL")
+        if not include_tool_calls:
+            extra_clauses.append("m.role != 'tool'")  # tool-result blobs = the fat
+        # Always drop pure machinery. NULL guard keeps content-less rows unaffected.
+        extra_clauses.append("NOT (m.role = 'system' AND m.content = '[stop: assistant turn ended]')")
+        extra_clauses.append("(m.content IS NULL OR m.content NOT LIKE '<task-notification>%')")
         extra_sql = "".join(f" AND {c}" for c in extra_clauses)
         if session_ids is not None:
             if not session_ids:

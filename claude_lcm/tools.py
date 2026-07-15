@@ -141,6 +141,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         match_mode = "fts5"
     include_thinking = bool(args.get("include_thinking", False))
     include_subagents = bool(args.get("include_subagents", False))
+    include_tool_calls = bool(args.get("include_tool_calls", False))
 
     session_id = engine._session_id
     session_ids = _resolve_scope_session_ids(engine, scope)
@@ -151,6 +152,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         msg_hits = engine._store.search(
             effective_query, session_ids=session_ids, limit=limit,
             include_thinking=include_thinking, include_subagents=include_subagents,
+            include_tool_calls=include_tool_calls,
         )
     except Exception as exc:
         # An FTS5 parse error must never masquerade as an empty result (a false
@@ -162,6 +164,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
             msg_hits = engine._store.search(
                 effective_query, session_ids=session_ids, limit=limit,
                 include_thinking=include_thinking, include_subagents=include_subagents,
+                include_tool_calls=include_tool_calls,
             )
             match_mode = "literal"
         except Exception as exc2:
@@ -224,12 +227,13 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     include_thinking = bool(args.get("include_thinking", False))
     include_subagents = bool(args.get("include_subagents", False))
     include_tool_calls = bool(args.get("include_tool_calls", False))
+    content_chars = args.get("content_chars")  # None => full content
 
     session_ids = _resolve_scope_session_ids(engine, scope)
     messages = engine._store.recent_messages(
         session_ids, limit=limit,
         include_thinking=include_thinking, include_subagents=include_subagents,
-        include_tool_calls=include_tool_calls,
+        include_tool_calls=include_tool_calls, content_chars=content_chars,
     )
     return json.dumps({
         "scope": scope,
