@@ -408,6 +408,39 @@ def test_lcm_recent_include_tool_calls_surfaces_payload(tmp_path):
     eng.close()
 
 
+def test_lcm_recent_excludes_tool_results_and_stop_markers_by_default(tmp_path):
+    """Default recall is the conversation. Tool-result rows (role='tool') and
+    the internal end-of-turn [stop] markers the Stop hook writes must not eat
+    the limit budget — otherwise a limit=20 recall is ~95% machinery."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_message({"role": "user", "content": "whats up", "timestamp": 1.0})
+    eng.ingest_message({"role": "assistant", "content": "here you go", "timestamp": 2.0})
+    eng.ingest_message({"role": "tool", "content": '{"stdout": "x"}', "timestamp": 3.0})
+    eng.ingest_message({"role": "system",
+                        "content": "[stop: assistant turn ended]", "timestamp": 4.0})
+
+    out = json.loads(lcm_recent({}, engine=eng))
+    contents = [m["content"] for m in out["messages"]]
+    assert contents == ["here you go", "whats up"]  # newest-first, no tool/stop noise
+    eng.close()
+
+
+def test_lcm_recent_include_tool_calls_includes_tool_results(tmp_path):
+    """Opting into tool activity brings back both the invocation rows and the
+    tool-result rows."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_message({"role": "assistant", "content": "reply", "timestamp": 1.0})
+    eng.ingest_message({"role": "tool", "content": '{"stdout": "ok"}', "timestamp": 2.0})
+
+    out = json.loads(lcm_recent({"include_tool_calls": True}, engine=eng))
+    assert "tool" in {m["role"] for m in out["messages"]}
+    eng.close()
+
+
 def test_lcm_recent_scope_lineage_crosses_clear(tmp_path):
     cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
     eng = ClaudeLcmEngine(config=cfg, session_id="B")

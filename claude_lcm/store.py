@@ -372,13 +372,18 @@ class MessageStore:
                         include_tool_calls: bool = False) -> List[Dict[str, Any]]:
         """Return the most recent `limit` messages across `session_ids`, newest first.
 
-        By default excludes `assistant_thinking` rows, subagent (non-null
-        `agent_id`) rows, and content-less tool-call rows (the assistant rows
-        PreToolUse records for each tool invocation \u2014 their payload is in
-        `tool_calls`, not `content`), so recall reads like the main conversation
-        thread. Set `include_tool_calls` to include those rows; when set, each
-        row's parsed `tool_calls` payload is surfaced so the null content is
-        explained rather than dumped.
+        Default recall is the conversation \u2014 user prompts and assistant reply
+        text \u2014 because that is what "catch me up" wants. Excluded by default
+        (each with an opt-in): `assistant_thinking` rows (`include_thinking`),
+        subagent rows (`include_subagents`), and all tool machinery
+        (`include_tool_calls`) \u2014 both the content-less assistant rows PreToolUse
+        records per invocation AND the `role='tool'` result rows, which together
+        can be 95%+ of raw rows and would otherwise crowd real messages out of
+        the limit budget (lcm_tool_calls is the audit path for them). When
+        `include_tool_calls` is set, each tool-call row's parsed `tool_calls`
+        payload is surfaced so its null content is explained rather than dumped.
+        Internal end-of-turn `[stop: assistant turn ended]` markers are always
+        excluded \u2014 they carry no recall value.
         """
         if not session_ids:
             return []
@@ -390,9 +395,13 @@ class MessageStore:
         if not include_subagents:
             clauses.append("agent_id IS NULL")
         if not include_tool_calls:
-            # Drop the content-less tool-invocation rows; lcm_tool_calls is the
-            # tool for auditing those.
+            # Drop tool machinery: the content-less tool-invocation rows and the
+            # tool-result rows. lcm_tool_calls is the tool for auditing those.
             clauses.append("content IS NOT NULL")
+            clauses.append("role != 'tool'")
+        # Internal turn-boundary markers are never conversational. The role guard
+        # keeps this from touching NULL-content rows (their role isn't 'system').
+        clauses.append("NOT (role = 'system' AND content = '[stop: assistant turn ended]')")
         where = " AND ".join(clauses)
         rows = self._conn.execute(
             f"""SELECT store_id, session_id, role, content, timestamp, agent_id,

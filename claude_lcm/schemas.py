@@ -65,12 +65,13 @@ _INCLUDE_SUBAGENTS_PARAM = {
 _INCLUDE_TOOL_CALLS_PARAM = {
     "type": "boolean",
     "description": (
-        "Include the assistant's tool-invocation rows. PreToolUse records each "
-        "tool call as an assistant row with no free-text content (its payload "
-        "is in `tool_calls`), so by default these are excluded from recall — "
-        "otherwise recall is mostly `content: null` rows. Default false; set "
-        "true to include them, and each row's parsed `tool_calls` is surfaced. "
-        "For a structured tool-call audit, prefer lcm_tool_calls."
+        "Include tool machinery in recall: the assistant tool-invocation rows "
+        "(recorded by PreToolUse with no free-text content — payload in "
+        "`tool_calls`) AND the tool-result rows. Both are excluded by default "
+        "because together they are the large majority of rows and would crowd "
+        "actual conversation out of the limit budget. Default false; set true "
+        "to include them (each invocation row's parsed `tool_calls` is "
+        "surfaced). For a structured tool-call audit, prefer lcm_tool_calls."
     ),
     "default": False,
 }
