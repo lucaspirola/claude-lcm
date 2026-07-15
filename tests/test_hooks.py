@@ -426,3 +426,115 @@ def test_limit_extraction():
     assert _extract_limit("remember our last 30 messages") == 30
     assert _extract_limit("past 7 messages please") == 7
     assert _extract_limit("catch me up") == 20  # default
+
+
+# ---------------------------------------------------------------------------
+# Transcript sync (assistant text/thinking + subagents) — Stop / SessionEnd
+# ---------------------------------------------------------------------------
+
+def _transcript_line(entry_type: str, role: str, content) -> str:
+    return json.dumps({
+        "type": entry_type,
+        "message": {"role": role, "content": content},
+        "timestamp": "2026-07-15T10:00:00.000Z",
+    }) + "\n"
+
+
+def test_stop_ingests_assistant_text_and_thinking(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    transcript = tmp_path / "sess-T.jsonl"
+    transcript.write_text(
+        _transcript_line("assistant", "assistant", [
+            {"type": "thinking", "thinking": "pondering the approach"},
+        ])
+        + _transcript_line("assistant", "assistant", [
+            {"type": "text", "text": "Here is my reply"},
+        ])
+    )
+
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "sess-T", "cwd": str(tmp_path)}, vault)
+    _run_hook("adapter.hooks.stop",
+              {"session_id": "sess-T", "transcript_path": str(transcript)}, vault)
+
+    rows = sqlite3.connect(vault).execute(
+        "SELECT role, content FROM messages WHERE session_id='sess-T' "
+        "AND role IN ('assistant', 'assistant_thinking') ORDER BY store_id"
+    ).fetchall()
+    assert rows == [
+        ("assistant_thinking", "pondering the approach"),
+        ("assistant", "Here is my reply"),
+    ]
+
+    # Re-firing Stop with an unchanged transcript must not duplicate rows.
+    _run_hook("adapter.hooks.stop",
+              {"session_id": "sess-T", "transcript_path": str(transcript)}, vault)
+    rows_again = sqlite3.connect(vault).execute(
+        "SELECT role, content FROM messages WHERE session_id='sess-T' "
+        "AND role IN ('assistant', 'assistant_thinking') ORDER BY store_id"
+    ).fetchall()
+    assert rows_again == rows
+
+    # Appending a new line and firing Stop again ingests only the delta.
+    with transcript.open("a") as f:
+        f.write(_transcript_line("assistant", "assistant", [
+            {"type": "text", "text": "Second reply"},
+        ]))
+    _run_hook("adapter.hooks.stop",
+              {"session_id": "sess-T", "transcript_path": str(transcript)}, vault)
+    rows_final = sqlite3.connect(vault).execute(
+        "SELECT role, content FROM messages WHERE session_id='sess-T' "
+        "AND role IN ('assistant', 'assistant_thinking') ORDER BY store_id"
+    ).fetchall()
+    assert rows_final == rows + [("assistant", "Second reply")]
+
+
+def test_stop_ingests_subagent_transcript(tmp_path: Path):
+    vault = tmp_path / "v.sqlite"
+    transcript = tmp_path / "sess-S.jsonl"
+    transcript.write_text("")  # main thread has nothing new this turn
+
+    subagents_dir = tmp_path / "sess-S" / "subagents"
+    subagents_dir.mkdir(parents=True)
+    agent_file = subagents_dir / "agent-a1.jsonl"
+    agent_file.write_text(
+        _transcript_line("user", "user", "Investigate the bug")
+        + _transcript_line("assistant", "assistant", [
+            {"type": "text", "text": "Found it in foo.py"},
+        ])
+    )
+
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "sess-S", "cwd": str(tmp_path)}, vault)
+    _run_hook("adapter.hooks.stop",
+              {"session_id": "sess-S", "transcript_path": str(transcript)}, vault)
+
+    rows = sqlite3.connect(vault).execute(
+        "SELECT role, content, agent_id FROM messages WHERE session_id='sess-S' "
+        "AND agent_id IS NOT NULL ORDER BY store_id"
+    ).fetchall()
+    assert rows == [
+        ("user", "Investigate the bug", "agent-a1"),
+        ("assistant", "Found it in foo.py", "agent-a1"),
+    ]
+
+
+def test_session_end_syncs_transcript_as_catchup(tmp_path: Path):
+    """SessionEnd should ingest any turn Stop never got to (e.g. killed process)."""
+    vault = tmp_path / "v.sqlite"
+    transcript = tmp_path / "sess-U.jsonl"
+    transcript.write_text(
+        _transcript_line("assistant", "assistant", [
+            {"type": "text", "text": "Final words"},
+        ])
+    )
+
+    _run_hook("adapter.hooks.session_start",
+              {"session_id": "sess-U", "cwd": str(tmp_path)}, vault)
+    _run_hook("adapter.hooks.session_end",
+              {"session_id": "sess-U", "transcript_path": str(transcript)}, vault)
+
+    row = sqlite3.connect(vault).execute(
+        "SELECT role, content FROM messages WHERE session_id='sess-U' AND role='assistant'"
+    ).fetchone()
+    assert row == ("assistant", "Final words")

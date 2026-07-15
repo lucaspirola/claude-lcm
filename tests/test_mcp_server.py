@@ -70,7 +70,85 @@ def test_doctor_healthy(engine):
     assert out["overall"] == "healthy"
     names = {c["check"] for c in out["checks"]}
     assert {"database_integrity", "fts_index_sync",
-            "orphaned_dag_nodes", "schema_version"} <= names
+            "orphaned_dag_nodes", "schema_version", "transcript_sync"} <= names
+
+
+def test_status_reports_role_counts_and_subagent_count(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", agent_kind="claude-code", workspace_path=str(tmp_path))
+    eng.ingest_message({"role": "user", "content": "hi"})
+    eng.ingest_message({"role": "assistant", "content": "reply"})
+    eng.ingest_message({"role": "assistant_thinking", "content": "reasoning"})
+    eng.ingest_message({"role": "assistant", "content": "sub reply", "agent_id": "agent-a1"})
+
+    out = json.loads(lcm_status({}, engine=eng))
+    assert out["store"]["role_counts"] == {
+        "user": 1, "assistant": 2, "assistant_thinking": 1,
+    }
+    assert out["store"]["subagent_transcripts_ingested"] == 1
+    assert out["transcript_sync"] == {"path": None, "synced_bytes": 0}
+    eng.close()
+
+
+def test_status_reports_transcript_sync_state(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", agent_kind="claude-code", workspace_path=str(tmp_path))
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+    }) + "\n")
+    eng.sync_transcript("s", str(transcript))
+
+    out = json.loads(lcm_status({}, engine=eng))
+    assert out["transcript_sync"]["path"] == str(transcript)
+    assert out["transcript_sync"]["synced_bytes"] == transcript.stat().st_size
+    assert out["transcript_sync"]["file_size_bytes"] == transcript.stat().st_size
+    eng.close()
+
+
+def test_doctor_transcript_sync_pass_when_caught_up(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", agent_kind="claude-code", workspace_path=str(tmp_path))
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+    }) + "\n")
+    eng.sync_transcript("s", str(transcript))
+
+    out = json.loads(lcm_doctor({}, engine=eng))
+    check = next(c for c in out["checks"] if c["check"] == "transcript_sync")
+    assert check["status"] == "pass"
+    assert out["overall"] == "healthy"
+    eng.close()
+
+
+def test_doctor_transcript_sync_warns_when_behind(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", agent_kind="claude-code", workspace_path=str(tmp_path))
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+    }) + "\n")
+    eng.sync_transcript("s", str(transcript))
+    # Simulate a large gap accumulating without another sync.
+    with transcript.open("a") as f:
+        f.write(("x" * 70000) + "\n")
+
+    out = json.loads(lcm_doctor({}, engine=eng))
+    check = next(c for c in out["checks"] if c["check"] == "transcript_sync")
+    assert check["status"] == "warn"
+    assert out["overall"] == "warnings"
+    eng.close()
 
 
 def test_lcm_grep_scope_lineage_walks_parents(tmp_path):
@@ -158,6 +236,48 @@ def test_lcm_recent_limit(tmp_path):
 
     out = json.loads(lcm_recent({"limit": 2}, engine=eng))
     assert len(out["messages"]) == 2
+    eng.close()
+
+
+def test_lcm_recent_excludes_thinking_and_subagents_by_default(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="A")
+    eng.open_session("A", project_key="-pk")
+    eng.ingest_message({"role": "assistant", "content": "main reply", "timestamp": 1.0})
+    eng.ingest_message({"role": "assistant_thinking", "content": "reasoning", "timestamp": 2.0})
+    eng.ingest_message({"role": "assistant", "content": "sub reply", "timestamp": 3.0,
+                        "agent_id": "agent-a1"})
+
+    out = json.loads(lcm_recent({}, engine=eng))
+    assert [m["content"] for m in out["messages"]] == ["main reply"]
+
+    out_thinking = json.loads(lcm_recent({"include_thinking": True}, engine=eng))
+    contents = {m["content"] for m in out_thinking["messages"]}
+    assert contents == {"main reply", "reasoning"}
+
+    out_subagents = json.loads(lcm_recent({"include_subagents": True}, engine=eng))
+    contents = {m["content"] for m in out_subagents["messages"]}
+    assert contents == {"main reply", "sub reply"}
+    eng.close()
+
+
+def test_lcm_grep_excludes_thinking_and_subagents_by_default(tmp_path):
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="A")
+    eng.open_session("A", project_key="-pk")
+    eng.ingest_message({"role": "assistant", "content": "kumquat in the reply"})
+    eng.ingest_message({"role": "assistant_thinking", "content": "kumquat in my reasoning"})
+    eng.ingest_message({"role": "assistant", "content": "kumquat from a subagent",
+                        "agent_id": "agent-a1"})
+
+    out = json.loads(lcm_grep({"query": "kumquat"}, engine=eng))
+    assert out["total_results"] == 1
+
+    out_all = json.loads(lcm_grep(
+        {"query": "kumquat", "include_thinking": True, "include_subagents": True},
+        engine=eng,
+    ))
+    assert out_all["total_results"] == 3
     eng.close()
 
 

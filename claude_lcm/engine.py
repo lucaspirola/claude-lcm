@@ -16,6 +16,7 @@ from .config import ClaudeLcmConfig
 from .dag import SummaryDAG
 from .store import MessageStore
 from .tokens import count_tokens
+from . import transcript as transcript_mod
 
 logger = logging.getLogger(__name__)
 
@@ -144,11 +145,65 @@ class ClaudeLcmEngine:
             exploration_summary=exploration_summary,
         )
 
+    def sync_transcript(self, session_id: str,
+                        transcript_path: str | None) -> int:
+        """Incrementally ingest new assistant text/thinking from Claude Code's
+        own transcript, plus any sibling subagent transcripts.
+
+        Safe to call repeatedly (e.g. once per Stop hook firing, again on
+        SessionEnd): each file's byte-offset cursor is persisted, so only
+        content appended since the last call is read. Returns the number of
+        messages ingested. No-op (returns 0) if `transcript_path` is falsy
+        or the file doesn't exist yet.
+        """
+        if not transcript_path:
+            return 0
+
+        ingested = 0
+
+        stored_path, offset = self._store.get_transcript_offset(session_id)
+        if stored_path != transcript_path:
+            # First time we've seen this path for this session (or it
+            # changed) — start from the beginning.
+            offset = 0
+        entries, new_offset = transcript_mod.read_new_lines(transcript_path, offset)
+        if entries:
+            messages = transcript_mod.extract_messages(entries, agent_id=None)
+            if messages:
+                self.ingest_messages(messages, session_id=session_id)
+                ingested += len(messages)
+        if new_offset != offset or stored_path != transcript_path:
+            self._store.set_transcript_offset(session_id, transcript_path, new_offset)
+
+        subagents_dir = Path(transcript_path).parent / Path(transcript_path).stem / "subagents"
+        if subagents_dir.is_dir():
+            for agent_file in sorted(subagents_dir.glob("agent-*.jsonl")):
+                agent_id = agent_file.stem
+                agent_offset = self._store.get_subagent_offset(session_id, agent_id)
+                agent_entries, agent_new_offset = transcript_mod.read_new_lines(
+                    agent_file, agent_offset
+                )
+                if agent_entries:
+                    agent_messages = transcript_mod.extract_messages(
+                        agent_entries, agent_id=agent_id
+                    )
+                    if agent_messages:
+                        self.ingest_messages(agent_messages, session_id=session_id)
+                        ingested += len(agent_messages)
+                if agent_new_offset != agent_offset:
+                    self._store.set_subagent_offset(session_id, agent_id, agent_new_offset)
+
+        return ingested
+
     # -- Query --------------------------------------------------------------
 
-    def grep(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    def grep(self, query: str, limit: int = 20,
+             include_thinking: bool = False,
+             include_subagents: bool = False) -> List[Dict[str, Any]]:
         return self._store.search(
-            query, session_id=self._session_id, limit=limit
+            query, session_id=self._session_id, limit=limit,
+            include_thinking=include_thinking,
+            include_subagents=include_subagents,
         )
 
     def vault_path(self) -> Path:

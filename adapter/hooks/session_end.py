@@ -15,7 +15,11 @@ def handle(payload: Dict[str, Any]) -> None:
         return
     source = payload.get("source")
     cwd = payload.get("cwd")
+    transcript_path = payload.get("transcript_path") or payload.get("transcriptPath")
     with engine_for(session_id) as eng:
+        # Final catch-up in case a Stop hook didn't fire for the last turn
+        # (e.g. the process was killed mid-turn).
+        eng.sync_transcript(session_id, transcript_path)
         eng.close_session(session_id)
         if source == "clear":
             eng.set_end_reason(session_id, "clear")

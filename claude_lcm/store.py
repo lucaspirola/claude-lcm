@@ -51,7 +51,8 @@ class MessageStore:
                 tool_name TEXT,
                 timestamp REAL NOT NULL,
                 token_estimate INTEGER DEFAULT 0,
-                pinned INTEGER DEFAULT 0
+                pinned INTEGER DEFAULT 0,
+                agent_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -140,6 +141,14 @@ class MessageStore:
             self._conn.execute(
                 "ALTER TABLE sessions ADD COLUMN end_reason TEXT"
             )
+        if "transcript_path" not in existing:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN transcript_path TEXT"
+            )
+        if "transcript_offset" not in existing:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN transcript_offset INTEGER DEFAULT 0"
+            )
         self._conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_sessions_project_key_ended
                ON sessions(project_key, ended_at DESC)"""
@@ -149,6 +158,26 @@ class MessageStore:
                 project_key       TEXT PRIMARY KEY,
                 ending_session_id TEXT NOT NULL,
                 ts                REAL NOT NULL
+            )"""
+        )
+        # --- agent_id: distinguishes main-thread rows (NULL) from subagent
+        # transcript rows (the subagent's agentId) (additive, idempotent) ---
+        msg_cols = {
+            r[1] for r in self._conn.execute(
+                "PRAGMA table_info(messages)"
+            ).fetchall()
+        }
+        if "agent_id" not in msg_cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN agent_id TEXT"
+            )
+        # --- subagent transcript read-cursors (additive) ---
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS subagent_offsets (
+                session_id TEXT NOT NULL,
+                agent_id   TEXT NOT NULL,
+                offset     INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, agent_id)
             )"""
         )
         # --- marks: first-class bookmarks / protocol markers (additive) ---
@@ -208,8 +237,8 @@ class MessageStore:
         cur = self._conn.execute(
             """INSERT INTO messages
                (session_id, role, content, tool_call_id, tool_calls,
-                tool_name, timestamp, token_estimate, pinned)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tool_name, timestamp, token_estimate, pinned, agent_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 msg.get("role", "unknown"),
@@ -220,6 +249,7 @@ class MessageStore:
                 msg.get("timestamp", time.time()),
                 token_estimate,
                 0,
+                msg.get("agent_id"),
             ),
         )
         self._conn.commit()
@@ -241,8 +271,8 @@ class MessageStore:
                 cur = self._conn.execute(
                     """INSERT INTO messages
                        (session_id, role, content, tool_call_id, tool_calls,
-                        tool_name, timestamp, token_estimate, pinned)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        tool_name, timestamp, token_estimate, pinned, agent_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         msg.get("role", "unknown"),
@@ -253,6 +283,7 @@ class MessageStore:
                         msg.get("timestamp", ts),
                         est,
                         0,
+                        msg.get("agent_id"),
                     ),
                 )
                 ids.append(cur.lastrowid)
@@ -335,20 +366,33 @@ class MessageStore:
         return row[0] if row else None
 
     def recent_messages(self, session_ids: list[str],
-                        limit: int = 10) -> List[Dict[str, Any]]:
-        """Return the most recent `limit` messages across `session_ids`, newest first."""
+                        limit: int = 10,
+                        include_thinking: bool = False,
+                        include_subagents: bool = False) -> List[Dict[str, Any]]:
+        """Return the most recent `limit` messages across `session_ids`, newest first.
+
+        By default excludes `assistant_thinking` rows and subagent (non-null
+        `agent_id`) rows, so recall reads like the main conversation thread.
+        """
         if not session_ids:
             return []
         placeholders = ",".join("?" * len(session_ids))
+        clauses = [f"session_id IN ({placeholders})"]
+        params: list = list(session_ids)
+        if not include_thinking:
+            clauses.append("role != 'assistant_thinking'")
+        if not include_subagents:
+            clauses.append("agent_id IS NULL")
+        where = " AND ".join(clauses)
         rows = self._conn.execute(
-            f"""SELECT store_id, session_id, role, content, timestamp
+            f"""SELECT store_id, session_id, role, content, timestamp, agent_id
                   FROM messages
-                 WHERE session_id IN ({placeholders})
+                 WHERE {where}
                  ORDER BY timestamp DESC
                  LIMIT ?""",
-            (*session_ids, limit),
+            (*params, limit),
         ).fetchall()
-        cols = ("store_id", "session_id", "role", "content", "timestamp")
+        cols = ("store_id", "session_id", "role", "content", "timestamp", "agent_id")
         result = []
         for row in rows:
             d = dict(zip(cols, row))
@@ -368,6 +412,46 @@ class MessageStore:
         self._conn.execute(
             "UPDATE sessions SET end_reason = ? WHERE session_id = ?",
             (end_reason, session_id),
+        )
+        self._conn.commit()
+
+    # -- Transcript sync cursors (claude-lcm extension) --------------------
+
+    def get_transcript_offset(self, session_id: str) -> tuple[str | None, int]:
+        """Return (transcript_path, offset) already recorded for a session.
+
+        offset is 0 (start of file) if the session has no cursor yet.
+        """
+        row = self._conn.execute(
+            "SELECT transcript_path, transcript_offset FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None, 0
+        return row[0], row[1] or 0
+
+    def set_transcript_offset(self, session_id: str, transcript_path: str,
+                              offset: int) -> None:
+        self._conn.execute(
+            """UPDATE sessions SET transcript_path = ?, transcript_offset = ?
+               WHERE session_id = ?""",
+            (transcript_path, offset, session_id),
+        )
+        self._conn.commit()
+
+    def get_subagent_offset(self, session_id: str, agent_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT offset FROM subagent_offsets WHERE session_id = ? AND agent_id = ?",
+            (session_id, agent_id),
+        ).fetchone()
+        return row[0] if row else 0
+
+    def set_subagent_offset(self, session_id: str, agent_id: str, offset: int) -> None:
+        self._conn.execute(
+            """INSERT INTO subagent_offsets (session_id, agent_id, offset)
+               VALUES (?, ?, ?)
+               ON CONFLICT(session_id, agent_id) DO UPDATE SET offset = excluded.offset""",
+            (session_id, agent_id, offset),
         )
         self._conn.commit()
 
@@ -624,16 +708,44 @@ class MessageStore:
         ).fetchone()
         return row[0] if row else 0
 
+    def get_role_counts(self, session_id: str) -> Dict[str, int]:
+        """Return {role: count} for a session — surfaces whether transcript
+        sync is actually populating `assistant`/`assistant_thinking` rows."""
+        rows = self._conn.execute(
+            "SELECT role, COUNT(*) FROM messages WHERE session_id = ? GROUP BY role",
+            (session_id,),
+        ).fetchall()
+        return {role: count for role, count in rows}
+
+    def get_subagent_count(self, session_id: str) -> int:
+        """Return the number of distinct subagent transcripts ingested for a session."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT agent_id) FROM messages "
+            "WHERE session_id = ? AND agent_id IS NOT NULL",
+            (session_id,),
+        ).fetchone()
+        return row[0] if row else 0
+
     # -- Search -------------------------------------------------------------
 
     def search(self, query: str, session_id: str | None = None,
                session_ids: list[str] | None = None,
-               limit: int = 20) -> List[Dict[str, Any]]:
+               limit: int = 20,
+               include_thinking: bool = False,
+               include_subagents: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across messages.
 
         At most one of `session_id` or `session_ids` should be provided.
-        If both are None, searches all sessions in the vault.
+        If both are None, searches all sessions in the vault. By default
+        excludes `assistant_thinking` rows and subagent (non-null `agent_id`)
+        rows — pass the `include_*` flags to widen the search.
         """
+        extra_clauses = []
+        if not include_thinking:
+            extra_clauses.append("m.role != 'assistant_thinking'")
+        if not include_subagents:
+            extra_clauses.append("m.agent_id IS NULL")
+        extra_sql = "".join(f" AND {c}" for c in extra_clauses)
         if session_ids is not None:
             if not session_ids:
                 return []
@@ -643,25 +755,25 @@ class MessageStore:
                    FROM messages_fts fts
                    JOIN messages m ON m.store_id = fts.rowid
                    WHERE messages_fts MATCH ?
-                     AND m.session_id IN ({placeholders})
+                     AND m.session_id IN ({placeholders}){extra_sql}
                    ORDER BY rank LIMIT ?""",
                 (query, *session_ids, limit),
             ).fetchall()
         elif session_id:
             rows = self._conn.execute(
-                """SELECT m.*, snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
+                f"""SELECT m.*, snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
                    FROM messages_fts fts
                    JOIN messages m ON m.store_id = fts.rowid
-                   WHERE messages_fts MATCH ? AND m.session_id = ?
+                   WHERE messages_fts MATCH ? AND m.session_id = ?{extra_sql}
                    ORDER BY rank LIMIT ?""",
                 (query, session_id, limit),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                """SELECT m.*, snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
+                f"""SELECT m.*, snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
                    FROM messages_fts fts
                    JOIN messages m ON m.store_id = fts.rowid
-                   WHERE messages_fts MATCH ?
+                   WHERE messages_fts MATCH ?{extra_sql}
                    ORDER BY rank LIMIT ?""",
                 (query, limit),
             ).fetchall()
@@ -680,6 +792,7 @@ class MessageStore:
         cols = [
             "store_id", "session_id", "role", "content", "tool_call_id",
             "tool_calls", "tool_name", "timestamp", "token_estimate", "pinned",
+            "agent_id",
         ]
         d = dict(zip(cols, row[:len(cols)]))
         if d.get("tool_calls"):

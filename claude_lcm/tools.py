@@ -139,6 +139,8 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     match_mode = args.get("match_mode", "fts5")
     if match_mode not in ("fts5", "literal"):
         match_mode = "fts5"
+    include_thinking = bool(args.get("include_thinking", False))
+    include_subagents = bool(args.get("include_subagents", False))
 
     session_id = engine._session_id
     session_ids = _resolve_scope_session_ids(engine, scope)
@@ -146,7 +148,10 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
 
     effective_query = _fts5_quote(query) if match_mode == "literal" else query
     try:
-        msg_hits = engine._store.search(effective_query, session_ids=session_ids, limit=limit)
+        msg_hits = engine._store.search(
+            effective_query, session_ids=session_ids, limit=limit,
+            include_thinking=include_thinking, include_subagents=include_subagents,
+        )
     except Exception as exc:
         # An FTS5 parse error must never masquerade as an empty result (a false
         # negative that reads as "no matches"). Retry once as a quoted literal;
@@ -155,7 +160,8 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         try:
             effective_query = _fts5_quote(query)
             msg_hits = engine._store.search(
-                effective_query, session_ids=session_ids, limit=limit
+                effective_query, session_ids=session_ids, limit=limit,
+                include_thinking=include_thinking, include_subagents=include_subagents,
             )
             match_mode = "literal"
         except Exception as exc2:
@@ -166,15 +172,16 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                 "hint": "Retry with match_mode='literal', or simplify the FTS5 query.",
             })
     for hit in msg_hits:
-        results.append(
-            {
-                "type": "message",
-                "depth": "raw",
-                "store_id": hit["store_id"],
-                "role": hit["role"],
-                "snippet": hit.get("snippet", hit.get("content", "")[:200]),
-            }
-        )
+        result = {
+            "type": "message",
+            "depth": "raw",
+            "store_id": hit["store_id"],
+            "role": hit["role"],
+            "snippet": hit.get("snippet", hit.get("content", "")[:200]),
+        }
+        if hit.get("agent_id"):
+            result["agent_id"] = hit["agent_id"]
+        results.append(result)
 
     try:
         # effective_query reflects the literal-mode fallback above, keeping the
@@ -214,9 +221,14 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     scope = args.get("scope", "lineage")
     if scope not in _VALID_SCOPES:
         scope = "lineage"
+    include_thinking = bool(args.get("include_thinking", False))
+    include_subagents = bool(args.get("include_subagents", False))
 
     session_ids = _resolve_scope_session_ids(engine, scope)
-    messages = engine._store.recent_messages(session_ids, limit=limit)
+    messages = engine._store.recent_messages(
+        session_ids, limit=limit,
+        include_thinking=include_thinking, include_subagents=include_subagents,
+    )
     return json.dumps({
         "scope": scope,
         "total_results": len(messages),
@@ -356,6 +368,8 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
 
     store_messages = engine._store.get_session_count(session_id)
     store_tokens = engine._store.get_session_token_total(session_id)
+    role_counts = engine._store.get_role_counts(session_id)
+    subagent_count = engine._store.get_subagent_count(session_id)
     all_nodes = engine._dag.get_session_nodes(session_id)
 
     depths: dict[int, dict] = {}
@@ -367,6 +381,17 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
 
     session_meta = engine._store.get_session(session_id) or {}
 
+    transcript_path, transcript_offset = engine._store.get_transcript_offset(session_id)
+    transcript_sync: Dict[str, Any] = {
+        "path": transcript_path,
+        "synced_bytes": transcript_offset,
+    }
+    if transcript_path:
+        try:
+            transcript_sync["file_size_bytes"] = os.path.getsize(transcript_path)
+        except OSError:
+            transcript_sync["file_size_bytes"] = None
+
     return json.dumps({
         "session_id": session_id,
         "agent_kind": session_meta.get("agent_kind"),
@@ -376,7 +401,10 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "store": {
             "messages": store_messages,
             "estimated_tokens": store_tokens,
+            "role_counts": role_counts,
+            "subagent_transcripts_ingested": subagent_count,
         },
+        "transcript_sync": transcript_sync,
         "dag": {
             "total_nodes": len(all_nodes),
             "depths": {
@@ -472,6 +500,44 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "status": "fail",
             "detail": str(e),
         })
+
+    if session_id:
+        try:
+            transcript_path, offset = engine._store.get_transcript_offset(session_id)
+            if not transcript_path:
+                # Not yet applicable (no Stop/SessionEnd has fired for this
+                # session) rather than unhealthy — a brand-new session
+                # legitimately has nothing to report here.
+                checks.append({
+                    "check": "transcript_sync",
+                    "status": "pass",
+                    "detail": "no transcript synced yet for this session "
+                              "(no Stop/SessionEnd hook has fired)",
+                })
+            elif not os.path.exists(transcript_path):
+                checks.append({
+                    "check": "transcript_sync",
+                    "status": "warn",
+                    "detail": f"transcript_path {transcript_path!r} no longer exists",
+                })
+            else:
+                size = os.path.getsize(transcript_path)
+                # A gap is expected transiently mid-turn (the writer is still
+                # flushing); only flag it as a real problem once it's larger
+                # than a single line could plausibly be.
+                behind = size - offset
+                checks.append({
+                    "check": "transcript_sync",
+                    "status": "pass" if behind < 65536 else "warn",
+                    "detail": f"synced {offset}/{size} bytes"
+                              + ("" if behind < 65536 else f" ({behind} bytes behind)"),
+                })
+        except Exception as e:
+            checks.append({
+                "check": "transcript_sync",
+                "status": "fail",
+                "detail": str(e),
+            })
 
     overall = "healthy"
     if any(ch["status"] == "fail" for ch in checks):

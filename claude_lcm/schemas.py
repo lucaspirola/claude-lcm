@@ -35,6 +35,27 @@ _SCOPE_PARAM = {
     "default": "lineage",
 }
 
+_INCLUDE_THINKING_PARAM = {
+    "type": "boolean",
+    "description": (
+        "Include the assistant's internal `thinking` blocks (role "
+        "'assistant_thinking'), not just its final reply text. Default "
+        "false — thinking is captured in the vault but hidden from recall "
+        "unless explicitly requested."
+    ),
+    "default": False,
+}
+
+_INCLUDE_SUBAGENTS_PARAM = {
+    "type": "boolean",
+    "description": (
+        "Include turns from subagent (Task/Agent tool) transcripts, not "
+        "just the main conversation thread. Default false — a single Task "
+        "call can be dozens of turns and would drown out the main thread."
+    ),
+    "default": False,
+}
+
 LCM_GREP = {
     "name": "lcm_grep",
     "description": (
@@ -73,6 +94,8 @@ LCM_GREP = {
             },
             "session_id": _SESSION_ID_PARAM,
             "scope": _SCOPE_PARAM,
+            "include_thinking": _INCLUDE_THINKING_PARAM,
+            "include_subagents": _INCLUDE_SUBAGENTS_PARAM,
         },
         "required": ["query"],
     },
@@ -190,6 +213,8 @@ LCM_RECENT = {
             },
             "scope": _SCOPE_PARAM,
             "session_id": _SESSION_ID_PARAM,
+            "include_thinking": _INCLUDE_THINKING_PARAM,
+            "include_subagents": _INCLUDE_SUBAGENTS_PARAM,
         },
         "required": [],
     },

@@ -129,6 +129,86 @@ def test_store_init_is_idempotent_on_existing_vault(tmp_path):
     store.close()
 
 
+def test_store_init_adds_transcript_sync_schema(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    db = tmp_path / "v.sqlite"
+    store = MessageStore(db)
+
+    session_cols = {r[1] for r in store._conn.execute(
+        "PRAGMA table_info(sessions)"
+    ).fetchall()}
+    assert {"transcript_path", "transcript_offset"} <= session_cols
+
+    message_cols = {r[1] for r in store._conn.execute(
+        "PRAGMA table_info(messages)"
+    ).fetchall()}
+    assert "agent_id" in message_cols
+
+    tables = {r[0] for r in store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert "subagent_offsets" in tables
+
+    store.close()
+
+    # Re-open on the same vault — additive migration must not raise.
+    store2 = MessageStore(db)
+    store2.close()
+
+
+def test_transcript_offset_roundtrip(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session("s1", "claude-code")
+
+    assert store.get_transcript_offset("s1") == (None, 0)
+    store.set_transcript_offset("s1", "/path/to/t.jsonl", 123)
+    assert store.get_transcript_offset("s1") == ("/path/to/t.jsonl", 123)
+    # Overwrite is idempotent
+    store.set_transcript_offset("s1", "/path/to/t.jsonl", 456)
+    assert store.get_transcript_offset("s1") == ("/path/to/t.jsonl", 456)
+    store.close()
+
+
+def test_subagent_offset_roundtrip(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session("s1", "claude-code")
+
+    assert store.get_subagent_offset("s1", "agent-a1") == 0
+    store.set_subagent_offset("s1", "agent-a1", 50)
+    assert store.get_subagent_offset("s1", "agent-a1") == 50
+    store.set_subagent_offset("s1", "agent-a1", 99)
+    assert store.get_subagent_offset("s1", "agent-a1") == 99
+    store.close()
+
+
+def test_recent_messages_excludes_thinking_and_subagents_by_default(tmp_path):
+    from claude_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "v.sqlite")
+    store.open_session("s1", "claude-code")
+    store.append("s1", {"role": "assistant", "content": "main reply"})
+    store.append("s1", {"role": "assistant_thinking", "content": "internal reasoning"})
+    store.append("s1", {"role": "assistant", "content": "sub reply", "agent_id": "agent-a1"})
+
+    default = store.recent_messages(["s1"], limit=10)
+    assert [m["content"] for m in default] == ["main reply"]
+
+    with_thinking = store.recent_messages(["s1"], limit=10, include_thinking=True)
+    assert {"main reply", "internal reasoning"} <= {m["content"] for m in with_thinking}
+    assert "sub reply" not in {m["content"] for m in with_thinking}
+
+    with_subagents = store.recent_messages(["s1"], limit=10, include_subagents=True)
+    assert {"main reply", "sub reply"} <= {m["content"] for m in with_subagents}
+    assert "internal reasoning" not in {m["content"] for m in with_subagents}
+
+    store.close()
+
+
 def test_open_session_persists_project_key_and_parent(tmp_path):
     from claude_lcm.store import MessageStore
 
