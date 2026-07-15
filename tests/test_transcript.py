@@ -49,7 +49,12 @@ def test_read_new_lines_holds_back_partial_trailing_line(tmp_path: Path):
     complete = _line("assistant", "assistant", [{"type": "text", "text": "done"}])
     partial = json.dumps({"type": "assistant", "message": {"role": "assistant",
                           "content": [{"type": "text", "text": "unfinished"}]}})
-    p.write_text(complete + partial)  # no trailing newline on the partial line
+    # Write bytes, not text: the parser tracks raw on-disk byte offsets, and
+    # this assertion pins one to a Python-computed length. Path.write_text opens
+    # in text mode, which on Windows translates '\n' -> '\r\n' and shifts every
+    # offset by a byte. Claude Code writes LF-delimited JSONL, so feed the parser
+    # exactly those bytes on every platform.
+    p.write_bytes((complete + partial).encode())  # no trailing newline on partial
 
     entries, offset = read_new_lines(p, 0)
     assert len(entries) == 1
@@ -57,8 +62,8 @@ def test_read_new_lines_holds_back_partial_trailing_line(tmp_path: Path):
     assert offset == len(complete.encode())
 
     # Completing the line on a later write is picked up from the held-back offset.
-    with p.open("a") as f:
-        f.write("\n")
+    with p.open("ab") as f:
+        f.write(b"\n")
     entries2, offset2 = read_new_lines(p, offset)
     assert len(entries2) == 1
     assert extract_messages(entries2)[0]["content"] == "unfinished"
