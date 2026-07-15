@@ -223,11 +223,13 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
         scope = "lineage"
     include_thinking = bool(args.get("include_thinking", False))
     include_subagents = bool(args.get("include_subagents", False))
+    include_tool_calls = bool(args.get("include_tool_calls", False))
 
     session_ids = _resolve_scope_session_ids(engine, scope)
     messages = engine._store.recent_messages(
         session_ids, limit=limit,
         include_thinking=include_thinking, include_subagents=include_subagents,
+        include_tool_calls=include_tool_calls,
     )
     return json.dumps({
         "scope": scope,

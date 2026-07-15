@@ -371,6 +371,43 @@ def test_lcm_describe_session_overview_unchanged(engine):
     assert "store_message_count" in out
 
 
+def test_lcm_recent_excludes_toolcall_rows_by_default(tmp_path):
+    """Recall should read like the conversation. PreToolUse records each tool
+    invocation as an assistant row with content=None + a tool_calls payload;
+    those must not surface as confusing `content: null` rows by default."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_message({"role": "user", "content": "hello"})
+    eng.ingest_message({"role": "assistant", "content": "hi there"})
+    eng.ingest_message({"role": "assistant", "content": None,
+                        "tool_calls": [{"id": "", "name": "Bash",
+                                        "arguments": {"command": "ls"}}]})
+
+    out = json.loads(lcm_recent({}, engine=eng))
+    contents = [m["content"] for m in out["messages"]]
+    assert None not in contents
+    assert set(contents) == {"hello", "hi there"}
+    eng.close()
+
+
+def test_lcm_recent_include_tool_calls_surfaces_payload(tmp_path):
+    """Opting in includes the tool-call rows AND surfaces their tool_calls
+    payload (so the null content is explained, not just dumped)."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_message({"role": "assistant", "content": None,
+                        "tool_calls": [{"id": "", "name": "Bash",
+                                        "arguments": {"command": "ls"}}]})
+
+    out = json.loads(lcm_recent({"include_tool_calls": True}, engine=eng))
+    tc_rows = [m for m in out["messages"] if m.get("tool_calls")]
+    assert len(tc_rows) == 1
+    assert tc_rows[0]["tool_calls"][0]["name"] == "Bash"
+    eng.close()
+
+
 def test_lcm_recent_scope_lineage_crosses_clear(tmp_path):
     cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
     eng = ClaudeLcmEngine(config=cfg, session_id="B")

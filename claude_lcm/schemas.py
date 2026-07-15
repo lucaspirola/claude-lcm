@@ -62,6 +62,19 @@ _INCLUDE_SUBAGENTS_PARAM = {
     "default": False,
 }
 
+_INCLUDE_TOOL_CALLS_PARAM = {
+    "type": "boolean",
+    "description": (
+        "Include the assistant's tool-invocation rows. PreToolUse records each "
+        "tool call as an assistant row with no free-text content (its payload "
+        "is in `tool_calls`), so by default these are excluded from recall — "
+        "otherwise recall is mostly `content: null` rows. Default false; set "
+        "true to include them, and each row's parsed `tool_calls` is surfaced. "
+        "For a structured tool-call audit, prefer lcm_tool_calls."
+    ),
+    "default": False,
+}
+
 LCM_GREP = {
     "name": "lcm_grep",
     "description": (
@@ -217,7 +230,10 @@ LCM_RECENT = {
         "Return the most recent N messages from the current session or its "
         "lineage, newest first. Use this after /clear to recall what was "
         "being discussed, or to orient yourself at the start of a session. "
-        "For keyword search, use lcm_grep instead."
+        "Reads like the main conversation: assistant `thinking`, subagent "
+        "turns, and content-less tool-invocation rows are excluded by default "
+        "(opt in via include_thinking / include_subagents / include_tool_calls). "
+        "For keyword search use lcm_grep; for a tool-call audit use lcm_tool_calls."
     ),
     "parameters": {
         "type": "object",
@@ -238,6 +254,7 @@ LCM_RECENT = {
             "session_id": _SESSION_ID_PARAM,
             "include_thinking": _INCLUDE_THINKING_PARAM,
             "include_subagents": _INCLUDE_SUBAGENTS_PARAM,
+            "include_tool_calls": _INCLUDE_TOOL_CALLS_PARAM,
         },
         "required": [],
     },

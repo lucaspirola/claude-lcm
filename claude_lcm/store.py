@@ -368,11 +368,17 @@ class MessageStore:
     def recent_messages(self, session_ids: list[str],
                         limit: int = 10,
                         include_thinking: bool = False,
-                        include_subagents: bool = False) -> List[Dict[str, Any]]:
+                        include_subagents: bool = False,
+                        include_tool_calls: bool = False) -> List[Dict[str, Any]]:
         """Return the most recent `limit` messages across `session_ids`, newest first.
 
-        By default excludes `assistant_thinking` rows and subagent (non-null
-        `agent_id`) rows, so recall reads like the main conversation thread.
+        By default excludes `assistant_thinking` rows, subagent (non-null
+        `agent_id`) rows, and content-less tool-call rows (the assistant rows
+        PreToolUse records for each tool invocation \u2014 their payload is in
+        `tool_calls`, not `content`), so recall reads like the main conversation
+        thread. Set `include_tool_calls` to include those rows; when set, each
+        row's parsed `tool_calls` payload is surfaced so the null content is
+        explained rather than dumped.
         """
         if not session_ids:
             return []
@@ -383,21 +389,33 @@ class MessageStore:
             clauses.append("role != 'assistant_thinking'")
         if not include_subagents:
             clauses.append("agent_id IS NULL")
+        if not include_tool_calls:
+            # Drop the content-less tool-invocation rows; lcm_tool_calls is the
+            # tool for auditing those.
+            clauses.append("content IS NOT NULL")
         where = " AND ".join(clauses)
         rows = self._conn.execute(
-            f"""SELECT store_id, session_id, role, content, timestamp, agent_id
+            f"""SELECT store_id, session_id, role, content, timestamp, agent_id,
+                       tool_calls
                   FROM messages
                  WHERE {where}
                  ORDER BY timestamp DESC
                  LIMIT ?""",
             (*params, limit),
         ).fetchall()
-        cols = ("store_id", "session_id", "role", "content", "timestamp", "agent_id")
+        cols = ("store_id", "session_id", "role", "content", "timestamp",
+                "agent_id", "tool_calls")
         result = []
         for row in rows:
             d = dict(zip(cols, row))
             if d["content"] and len(d["content"]) > 500:
                 d["content"] = d["content"][:500] + "\u2026"
+            raw_tc = d.pop("tool_calls")
+            if include_tool_calls and raw_tc:
+                try:
+                    d["tool_calls"] = json.loads(raw_tc)
+                except (json.JSONDecodeError, TypeError):
+                    d["tool_calls"] = raw_tc
             result.append(d)
         return result
 
