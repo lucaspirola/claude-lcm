@@ -427,17 +427,41 @@ def test_lcm_recent_excludes_tool_results_and_stop_markers_by_default(tmp_path):
     eng.close()
 
 
-def test_lcm_recent_include_tool_calls_includes_tool_results(tmp_path):
-    """Opting into tool activity brings back both the invocation rows and the
-    tool-result rows."""
+def test_lcm_recent_tool_results_are_never_returned(tmp_path):
+    """Tool RESULTS are 'the fat' — excluded from recall even with
+    include_tool_calls. include_tool_calls restores only the exact tool CALLS
+    (name + args) for post-mortem reconstruction; results live in lcm_tool_calls."""
     cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
     eng = ClaudeLcmEngine(config=cfg, session_id="s")
     eng.open_session("s", project_key="-pk")
-    eng.ingest_message({"role": "assistant", "content": "reply", "timestamp": 1.0})
-    eng.ingest_message({"role": "tool", "content": '{"stdout": "ok"}', "timestamp": 2.0})
+    eng.ingest_message({"role": "assistant", "content": None, "timestamp": 1.0,
+                        "tool_calls": [{"id": "", "name": "Bash",
+                                        "arguments": {"command": "ls"}}]})
+    eng.ingest_message({"role": "tool", "content": '{"stdout": "huge fat output"}',
+                        "timestamp": 2.0})
 
     out = json.loads(lcm_recent({"include_tool_calls": True}, engine=eng))
-    assert "tool" in {m["role"] for m in out["messages"]}
+    roles = [m["role"] for m in out["messages"]]
+    assert "tool" not in roles                     # the fat is gone
+    call = [m for m in out["messages"] if m.get("tool_calls")]
+    assert len(call) == 1                           # the exact call remains
+    assert call[0]["tool_calls"][0]["arguments"]["command"] == "ls"  # exact args
+    eng.close()
+
+
+def test_lcm_recent_excludes_task_notifications(tmp_path):
+    """Harness-injected <task-notification> blocks are stored as user turns
+    (UserPromptSubmit fires for them) but are machinery, not conversation —
+    excluded from recall, still in the vault."""
+    cfg = ClaudeLcmConfig(vault_path=tmp_path / "v.sqlite")
+    eng = ClaudeLcmEngine(config=cfg, session_id="s")
+    eng.open_session("s", project_key="-pk")
+    eng.ingest_message({"role": "user", "content": "real question", "timestamp": 1.0})
+    eng.ingest_message({"role": "user", "timestamp": 2.0,
+                        "content": "<task-notification>\n<task-id>abc</task-id>\ndone"})
+
+    out = json.loads(lcm_recent({}, engine=eng))
+    assert [m["content"] for m in out["messages"]] == ["real question"]
     eng.close()
 
 

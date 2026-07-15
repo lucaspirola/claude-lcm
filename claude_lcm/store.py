@@ -373,17 +373,24 @@ class MessageStore:
         """Return the most recent `limit` messages across `session_ids`, newest first.
 
         Default recall is the conversation \u2014 user prompts and assistant reply
-        text \u2014 because that is what "catch me up" wants. Excluded by default
-        (each with an opt-in): `assistant_thinking` rows (`include_thinking`),
-        subagent rows (`include_subagents`), and all tool machinery
-        (`include_tool_calls`) \u2014 both the content-less assistant rows PreToolUse
-        records per invocation AND the `role='tool'` result rows, which together
-        can be 95%+ of raw rows and would otherwise crowd real messages out of
-        the limit budget (lcm_tool_calls is the audit path for them). When
-        `include_tool_calls` is set, each tool-call row's parsed `tool_calls`
-        payload is surfaced so its null content is explained rather than dumped.
-        Internal end-of-turn `[stop: assistant turn ended]` markers are always
-        excluded \u2014 they carry no recall value.
+        text \u2014 because that is what "catch me up" wants. Excluded by default,
+        each with an opt-in:
+
+        - `assistant_thinking` rows \u2192 `include_thinking`
+        - subagent rows \u2192 `include_subagents`
+        - the assistant's tool-invocation rows (content-less; the exact call is
+          in `tool_calls`) \u2192 `include_tool_calls`. The call itself is
+          information \u2014 with the flag set, the parsed `tool_calls` (exact name +
+          args) is surfaced so the run can be reconstructed for a post-mortem.
+
+        Two classes are *always* excluded from recall \u2014 they are noise/"fat",
+        never conversation \u2014 but stay in the vault (lossless), reachable via
+        lcm_tool_calls or lcm_grep:
+
+        - `role='tool'` result rows \u2014 the bulky tool output ("the fat"); use
+          lcm_tool_calls (with result_chars) to see results.
+        - internal `[stop: assistant turn ended]` markers and harness-injected
+          `<task-notification>` blocks stored as user turns.
         """
         if not session_ids:
             return []
@@ -394,14 +401,17 @@ class MessageStore:
             clauses.append("role != 'assistant_thinking'")
         if not include_subagents:
             clauses.append("agent_id IS NULL")
+        # Tool RESULTS are the fat \u2014 never in recall; lcm_tool_calls serves them
+        # with result truncation. Tool CALLS are information: excluded by default
+        # for a lean recall, restored (with exact args) by include_tool_calls.
+        clauses.append("role != 'tool'")
         if not include_tool_calls:
-            # Drop tool machinery: the content-less tool-invocation rows and the
-            # tool-result rows. lcm_tool_calls is the tool for auditing those.
-            clauses.append("content IS NOT NULL")
-            clauses.append("role != 'tool'")
-        # Internal turn-boundary markers are never conversational. The role guard
-        # keeps this from touching NULL-content rows (their role isn't 'system').
+            clauses.append("content IS NOT NULL")  # drops the content-less call rows
+        # Always drop pure machinery. The `content IS NULL OR` guards keep these
+        # from swallowing the NULL-content call rows (their role isn't system and
+        # they never start with the notification tag).
         clauses.append("NOT (role = 'system' AND content = '[stop: assistant turn ended]')")
+        clauses.append("(content IS NULL OR content NOT LIKE '<task-notification>%')")
         where = " AND ".join(clauses)
         rows = self._conn.execute(
             f"""SELECT store_id, session_id, role, content, timestamp, agent_id,

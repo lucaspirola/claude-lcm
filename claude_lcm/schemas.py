@@ -65,13 +65,12 @@ _INCLUDE_SUBAGENTS_PARAM = {
 _INCLUDE_TOOL_CALLS_PARAM = {
     "type": "boolean",
     "description": (
-        "Include tool machinery in recall: the assistant tool-invocation rows "
-        "(recorded by PreToolUse with no free-text content — payload in "
-        "`tool_calls`) AND the tool-result rows. Both are excluded by default "
-        "because together they are the large majority of rows and would crowd "
-        "actual conversation out of the limit budget. Default false; set true "
-        "to include them (each invocation row's parsed `tool_calls` is "
-        "surfaced). For a structured tool-call audit, prefer lcm_tool_calls."
+        "Include the assistant's tool CALLS in recall — the exact invocation "
+        "(tool name + args), surfaced from `tool_calls`, so a run can be "
+        "reconstructed for a post-mortem. Excluded by default to keep recall a "
+        "lean conversation; set true for the full trace. Tool RESULTS (the "
+        "bulky output) are never returned here regardless — use lcm_tool_calls "
+        "(with result_chars) to see results."
     ),
     "default": False,
 }
@@ -231,10 +230,13 @@ LCM_RECENT = {
         "Return the most recent N messages from the current session or its "
         "lineage, newest first. Use this after /clear to recall what was "
         "being discussed, or to orient yourself at the start of a session. "
-        "Reads like the main conversation: assistant `thinking`, subagent "
-        "turns, and content-less tool-invocation rows are excluded by default "
-        "(opt in via include_thinking / include_subagents / include_tool_calls). "
-        "For keyword search use lcm_grep; for a tool-call audit use lcm_tool_calls."
+        "Reads like the main conversation: assistant `thinking`, subagent turns, "
+        "and the assistant's tool-call rows are excluded by default (opt in via "
+        "include_thinking / include_subagents / include_tool_calls — the last "
+        "surfaces the exact calls for a post-mortem trace). Always excluded as "
+        "noise: bulky tool RESULTS, internal end-of-turn markers, and "
+        "harness-injected task-notification blocks. For keyword search use "
+        "lcm_grep; for tool call+result auditing use lcm_tool_calls."
     ),
     "parameters": {
         "type": "object",
